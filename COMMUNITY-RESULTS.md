@@ -22,6 +22,8 @@ remain in [RESULTS.md](RESULTS.md).
 [u/kazimirek](https://www.reddit.com/user/kazimirek/).
 [Original field report](https://www.reddit.com/r/BlackwellPerformance/comments/1weaxdz/comment/p9cn6h6/).
 
+**Pennyroyal version:** v2.1.1, source `fb1216c6c`.
+
 > Your runtime has been running a real workload for me for over a week now and it just works
 
 **4.8 billion prompt tokens with a reported 96% prefix-cache hit rate**, alongside
@@ -85,6 +87,9 @@ Pennyroyal repository. The comments include repeated scheduler-log samples
 for **27B FP8 with FP8 KV**, then **Flash-Next NVFP4 with FP8 KV and
 `SGLANG_SM120_ONLINE_MXFP8` enabled**.
 
+**Pennyroyal version:** not specified. The author describes the updated
+repository in the v2.5 release thread, but does not identify a release tag or SHA.
+
 | Model and workload | Author's throughput summary | Range of posted C4 samples | Posted C4 acceptance length |
 |---|---|---:|---:|
 | [27B FP8, GSM8K](https://www.reddit.com/r/BlackwellPerformance/comments/1weaxdz/comment/p9cv7a2/) | Up to about 800 tok/s sustained | 743–819 tok/s aggregate | 6.11–6.49 |
@@ -118,6 +123,8 @@ for their use; no matched numeric comparison was supplied there.
 **Reported September 12, 2026** by
 [u/StockSpecialist1707](https://www.reddit.com/user/StockSpecialist1707/).
 [Original report](https://www.reddit.com/r/BlackwellPerformance/comments/1weaxdz/comment/p9e3xao/).
+
+**Pennyroyal version:** v2.5.0, as stated by the author.
 
 The author used the v2.5.0 Flash-Next FR-Spec recipe with online FP8 on a
 **single RTX PRO 6000 Blackwell Workstation Edition, 96 GB, TP1**, driver
@@ -167,8 +174,11 @@ future two-card sweep; no result from that proposed sweep is included here.
 ## H3PO — two-GPU Flash-Next
 
 **Reported August 28, 2026** by
-[u/H3PO](https://www.reddit.com/user/H3PO/), on an earlier Pennyroyal branch,
-before v2.5.0; the exact source SHA was not stated in the benchmark comments.
+[u/H3PO](https://www.reddit.com/user/H3PO/).
+
+**Pennyroyal version:** not specified; the August 28 branch was used, without
+a release tag or SHA identified in the benchmark comments.
+
 The deployment used **two RTX PRO 6000s, TP2/EP2, without NVLink**, FP8 KV,
 and native NEXTN MTP. It was a Docker deployment built from the branch, not
 evidence that the repository's inherited Dockerfile reproduces our native
