@@ -87,8 +87,7 @@ Pennyroyal repository. The comments include repeated scheduler-log samples
 for **27B FP8 with FP8 KV**, then **Flash-Next NVFP4 with FP8 KV and
 `SGLANG_SM120_ONLINE_MXFP8` enabled**.
 
-**Pennyroyal version:** not specified. The author describes the updated
-repository in the v2.5 release thread, but does not identify a release tag or SHA.
+**Pennyroyal version:** v2.5.0. An exact source SHA was not supplied.
 
 | Model and workload | Author's throughput summary | Range of posted C4 samples | Posted C4 acceptance length |
 |---|---|---:|---:|
