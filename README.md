@@ -84,6 +84,12 @@ are in [FP8.md](FP8.md#credit) and [NVME-PLE.md](NVME-PLE.md#source-and-credit).
 
 ### Flash-Next v2.5.0 online-FP8 performance at a glance
 
+**Beyond our machine:** [Community results](COMMUNITY-RESULTS.md) collects
+independent users' reports, including more than a week of Max-Q agentic use:
+**4.8 billion prompt tokens with a reported 96% prefix-cache hit rate**, plus
+**55 million generated tokens**. It also covers both-model benchmarks and TP2.
+These are contributor-reported observations, not our own qualification.
+
 Measured September 11, 2026, on one RTX PRO 6000, TP1, with FR-Spec,
 524,288-token context, 824,384 KV tokens, RAM-backed PLE and HiCache/NIXL
 retained. Online FP8 was compared with a fresh immediately preceding option-off
@@ -486,6 +492,8 @@ H3PO independently validated this runtime on a dual-GPU TP=2/EP=2 FP8
 deployment with native MTP after removing the optional overlap-plan-stream
 setting. The raw third-party table, corpus description, capacity result, and
 scope limits are preserved in [RESULTS.md](RESULTS.md#independent-tp2-fp8-validation).
+See [Community results](COMMUNITY-RESULTS.md#h3po--two-gpu-flash-next) for
+H3PO's NVFP4 follow-up and reports from other operators.
 
 ### Qwen3.8-27B FP8/DFlash2 — August 24, 2026 campaign
 

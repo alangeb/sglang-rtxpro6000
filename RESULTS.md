@@ -5,6 +5,11 @@ adds Flash-Next as a separate configuration of the same SGLang source. Metrics
 with different timing windows are never added together or presented as one
 interchangeable throughput number.
 
+**Looking for other users' experience?** [Community results](COMMUNITY-RESULTS.md)
+keeps credited external field reports separate from our measurements, including
+week-long agentic use, Max-Q, both model profiles and multi-GPU deployments.
+The older H3PO raw table below is retained at its existing link.
+
 ## Measurement definitions
 
 - **Cold prefill:** processing a prompt with no matching radix or persistent
