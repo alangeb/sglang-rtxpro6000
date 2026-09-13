@@ -14,6 +14,7 @@ remain in [RESULTS.md](RESULTS.md).
 - [kazimirek: more than a week of agentic work on a 300 W Max-Q](#kazimirek--a-week-of-agentic-work-on-max-q)
 - [WonderRico: both profiles on GSM8K and Automation Bench](#wonderrico--both-profiles-on-gsm8k-and-automation-bench)
 - [StockSpecialist1707: a larger single-GPU pool and online FP8](#stockspecialist1707--single-gpu-capacity-and-online-fp8)
+- [hpiguyTR: RAM versus NVMe PLE over OCuLink](#hpiguytr--ram-versus-nvme-ple-over-oculink)
 - [H3PO: two-GPU Flash-Next FP8 and NVFP4](#h3po--two-gpu-flash-next)
 
 ## kazimirek — a week of agentic work on Max-Q
@@ -119,7 +120,7 @@ for their use; no matched numeric comparison was supplied there.
 
 ## StockSpecialist1707 — single-GPU capacity and online FP8
 
-**Reported September 12, 2026** by
+**Reported September 12, with follow-up September 13, 2026** by
 [u/StockSpecialist1707](https://www.reddit.com/user/StockSpecialist1707/).
 [Original report](https://www.reddit.com/r/BlackwellPerformance/comments/1weaxdz/comment/p9e3xao/).
 
@@ -151,6 +152,8 @@ actually selects the explicit **824,384 default cap**. The report's pool and
 free-memory numbers are preserved, but they do not by themselves establish an
 estimator defect. A clamped startup allocation also does not guarantee enough
 transient memory for every later workload.
+The author subsequently [acknowledged this correction](https://www.reddit.com/r/BlackwellPerformance/comments/1weaxdz/comment/p9fvkzl/)
+and returned with the sustained tests below.
 
 ### Reported optimization comparison
 
@@ -169,6 +172,86 @@ claim a statistically established zero decode cost for the larger pool.
 The author identifies the system as BESTIA, managed with Prometeus, and
 discloses that Claude drafted the write-up from their logs. They offered a
 future two-card sweep; no result from that proposed sweep is included here.
+
+### Follow-up: sustained testing at 1,114,304 KV tokens
+
+In the [September 13 follow-up](https://www.reddit.com/r/BlackwellPerformance/comments/1weaxdz/comment/p9i76fb/),
+the author kept v2.5.0, FR-Spec, online FP8 and TP1, requesting 1,310,720 tokens
+and receiving the same **1,114,304-token pool**.
+
+| Reported workload | Reported result |
+|---|---|
+| 20 back-to-back generations, 4,096 output tokens | Mean 16.2 s; range 15.1–17.2 s; no timing drift |
+| 40 reuses of a cached approximately 100K prefix | 6–7 s each after the first |
+| 60 fresh approximately 100K prefills, shuffled to avoid prefix hits | 17–18 s each; 60/60 HTTP 200 |
+| 15 rounds of four submitted approximately 100K requests | Steady-state 61–63 s per round; peak 542,080 tokens / 49% pool usage |
+| 10 rounds of four submitted approximately 240K requests, 8,192 output tokens each | 93–107 s per round; 40/40 HTTP 200; peak 57% pool usage |
+
+The author reported **zero OOMs, retractions or aborts**, with the service
+remaining active throughout. During the approximately 100K concurrent test,
+they reported 12–13K tok/s prefill and 405 tok/s aggregate decode with two
+requests running. These are their reported timings and scheduler rates, not
+our fixed-output benchmark measurements.
+
+**What this establishes:** sustained operation under the reported workload,
+beyond startup capacity and three short runs. Four submitted requests did not
+necessarily mean four running together: the author observed queuing in the
+240K test, and occupancy peaked at 57%, not the intended 85–90%. This does not
+establish near-full-pool concurrency, retrieval correctness from HTTP status,
+or headroom for arbitrary image workloads. Served context remained 524,288;
+the follow-up does not supply a new needle-test result. The larger pool is an
+independent tested configuration, **not a change to Pennyroyal's default**.
+
+## hpiguyTR — RAM versus NVMe PLE over OCuLink
+
+**Reported September 13, 2026** by
+[u/hpiguyTR](https://www.reddit.com/user/hpiguyTR/).
+[Original field report](https://www.reddit.com/r/BlackwellPerformance/comments/1weaxdz/comment/p9humyi/).
+
+**Pennyroyal version:** not explicitly stated. The report appears in the v2.5
+release thread and compares RAM/NVMe paths; no exact tag or source SHA is given.
+
+The author used an RTX PRO 6000 in an **OCuLink eGPU enclosure with four PCIe
+lanes**, attached to a Minisforum MS-S1 Max: Ryzen AI Max+ 395, Radeon 8060S
+iGPU and 128 GB LPDDR5x-8000. A separate image model shared host memory through
+the iGPU. Both PLE paths used the same checkpoint and FP8 setting; the exact
+checkpoint ID and complete serving configuration were not supplied.
+
+The practical gain was memory: the author measured approximately **99.5 GB
+with RAM PLE versus 35 GB with NVMe PLE**, using cgroup anonymous plus shared
+memory rather than total `memory.current`, which also includes file cache.
+That let the image model remain resident beside the LLM. These are reported
+whole-runtime footprints, not a measurement of the PLE table alone or proof
+that all NVMe/file-cache memory disappears.
+
+### Reported decode comparison
+
+Short context, 1,024 output tokens; the comment does not specify the timing
+denominator or repeat count.
+
+| Concurrent requests | RAM PLE | NVMe PLE |
+|---|---:|---:|
+| 1 | 222 tok/s | 224 tok/s |
+| 2 | 349 tok/s aggregate | 323 tok/s aggregate |
+| 3 | 460 tok/s aggregate | 454 tok/s aggregate |
+| 4 | 411 tok/s aggregate | 403 tok/s aggregate |
+
+At **128K context, one stream and 1,024 output tokens**, the author reported
+176 tok/s with RAM versus 164 tok/s with NVMe, approximately 7% lower.
+They explicitly could not separate the NVMe cost from the four-lane eGPU
+connection. Load times were 255 s for RAM and 223 s for NVMe with warm JIT
+caches; teardown was 10 s for either path.
+
+Both paths also selected the expected tools and arguments in a synthetic
+agentic prompt containing tool definitions and conversation history, without
+phantom calls. This is a reported functional spot check, not a full tool suite.
+
+**Integration note:** the author initially bypassed the launch scripts and
+only set the environment option, leaving the RAM path active and encountering
+an OOM. Their working setup also required the reader plugin/import path,
+prepared model overlay and removal of the RAM-PLE flag. Use the documented
+[NVMe PLE setup](NVME-PLE.md) rather than treating the environment variable
+alone as a complete integration.
 
 ## H3PO — two-GPU Flash-Next
 

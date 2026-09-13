@@ -88,6 +88,9 @@ are in [FP8.md](FP8.md#credit) and [NVME-PLE.md](NVME-PLE.md#source-and-credit).
 independent users' reports, including more than a week of Max-Q agentic use:
 **4.8 billion prompt tokens with a reported 96% prefix-cache hit rate**, plus
 **55 million generated tokens**. It also covers both-model benchmarks and TP2.
+Special thanks to [u/StockSpecialist1707](COMMUNITY-RESULTS.md#stockspecialist1707--single-gpu-capacity-and-online-fp8)
+for independently stress-testing v2.5 with a **1.11M-token KV pool** and sharing
+the workload results and limits, not just a successful boot.
 These are contributor-reported observations, not our own qualification.
 
 Measured September 11, 2026, on one RTX PRO 6000, TP1, with FR-Spec,
