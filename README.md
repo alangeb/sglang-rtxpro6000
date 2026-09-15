@@ -310,6 +310,23 @@ The important work is architectural, not merely a collection of launch flags:
 - Measured reasoning, tool-calling, vision, long-context needle, controlled
   decode, and real agentic behavior.
 
+## Building on Pennyroyal
+
+I am genuinely thrilled when people run Pennyroyal directly, adapt parts of
+it, or use it as a jumping-off point for their own runtime, deployment guide,
+benchmark, or optimization. That is a large part of why the complete source,
+recipes, evidence, and failure boundaries are public.
+
+If you publish work that uses or builds on Pennyroyal, please link the
+canonical repository and identify the release tag or commit you started from:
+
+- [jpezzulli/sglang-rtxpro6000](https://github.com/jpezzulli/sglang-rtxpro6000)
+- Current release: [`pennyroyal-v2.5.0`](https://github.com/jpezzulli/sglang-rtxpro6000/releases/tag/pennyroyal-v2.5.0)
+
+A short note distinguishing the Pennyroyal source or technique from your own
+changes helps readers reproduce the lineage, understand what you improved, and
+find both projects.
+
 ## Published identity
 
 The former `jpezzulli/qwen38-dflash2-pro6000` repository URL redirects to this
