@@ -1,15 +1,56 @@
-# One SGLang runtime, two Qwen3.8 configurations, one RTX PRO 6000
+# SGLang for Qwen3.8 on one NVIDIA RTX PRO 6000 Blackwell (SM120)
 
-> One optimized SGLang runtime for a single RTX PRO 6000, with qualified
-> launch configurations for both Qwen3.8-27B/DFlash2 and Qwen3.8 Flash-Next.
+> Pennyroyal is an optimized SGLang-derived runtime with qualified single-GPU
+> launch configurations for Qwen3.8-27B FP8 with DFlash2 and Qwen3.8
+> Flash-Next NVFP4 with native NEXTN and FR-Spec.
 
 This repository contains the complete SGLang-derived source used on one
 NVIDIA RTX PRO 6000 Blackwell Workstation Edition (96 GB, SM120, TP=1). It is
 not two builds: both model configurations run from the same patched source.
 
-**Get running:** [Fresh install](BUILD.md#fresh-install) ·
-[Update an existing install](BUILD.md#update-an-existing-install) ·
-[Choose a model](#models-and-launch-recipes) · [Launch](RUN.md).
+**Get running:** [Build SGLang on SM120](BUILD.md) ·
+[Choose a model](#qualified-model-profiles-and-launch-recipes) ·
+[Run Qwen3.8](RUN.md).
+
+**Evidence:** [Benchmarks and measurement definitions](RESULTS.md) ·
+[Community-reported results](COMMUNITY-RESULTS.md) ·
+[Validation suite and published reports](https://github.com/jpezzulli/pennyroyal-validation).
+
+<a id="models-and-launch-recipes"></a>
+
+## Qualified model profiles and launch recipes
+
+The two profiles below are equally supported with **524,288-token context,
+HiCache and NIXL** on one RTX PRO 6000. The linked targets are the public
+reference checkpoints for their recipes; that designation is not a claim that
+every compatible checkpoint was separately benchmarked.
+
+| Profile | Precision | Speculative decoding | Launcher |
+|---|---|---|---|
+| **Qwen3.8 Flash-Next** | NVFP4 target with FP8 KV | Native NEXTN MTP with FR-Spec; no separate draft download | Start with the recommended [FR-Spec launcher](configs/pennyroyal/serve-flash-next-frspec.sh). The [non-FR launcher](configs/pennyroyal/serve-flash-next.sh) remains available. [Online FP8](FP8.md) and [NVMe PLE](NVME-PLE.md) are independent opt-ins. Reference target: [RadixArk/Qwen3.8-Flash-Next-NVFP4](https://huggingface.co/RadixArk/Qwen3.8-Flash-Next-NVFP4). |
+| **Qwen3.8-27B** | FP8 target and KV | DFlash2 with a separate draft checkpoint | Use the [27B launcher](configs/pennyroyal/serve-qwen38-27b-dflash2.sh). Reference target: [Qwen/Qwen3.8-27B-FP8](https://huggingface.co/Qwen/Qwen3.8-27B-FP8); draft: [incoai/Qwen3.8-27B-DFlash2](https://huggingface.co/incoai/Qwen3.8-27B-DFlash2). |
+
+The retained public 27B measurements used
+[orcarouter/Qwen3.8-27B-Uncensored-FP8](https://huggingface.co/orcarouter/Qwen3.8-27B-Uncensored-FP8),
+an uncensored/abliterated derivative of the official checkpoint. That
+provenance is material to behavioral results. Compatibility still depends on
+matching architecture, quantization, tokenizer, and speculative-decoding
+requirements.
+
+FR-Spec credit goes directly to Gabriel's
+[`gabrielolympie/sglang-flashnext-sm120`](https://github.com/gabrielolympie/sglang-flashnext-sm120).
+Both recipes pin the unmodified
+[Froggeric v22.5 template](configs/pennyroyal/templates/README.md).
+
+The v2.5.0 online-FP8 implementation is directly inspired by
+[`mratsim/sglang-qwen38fn-sm120-turbo`](https://github.com/mratsim/sglang-qwen38fn-sm120-turbo/tree/94a68214b77514bc26ef78cee4c01f128162d09b)
+at commit `94a68214b77514bc26ef78cee4c01f128162d09b`, especially patches
+`0003`, `0007`, and `0008`. Optional NVMe PLE adapts Garner McCloud's
+[SSD Stream v0.2.0](https://github.com/garnermccloud/sglang-ssd-stream/tree/176a522ef9d6dbb5056ae1f467fe49af0f1258a5),
+with the upstream license and NOTICE retained. Detailed boundaries and credit
+are in [FP8.md](FP8.md#credit) and [NVME-PLE.md](NVME-PLE.md#source-and-credit).
+
+## Current release — Pennyroyal v2.5.0
 
 **v2.5.0** adds two substantial, optional Flash-Next capabilities while keeping
 the existing behavior as the default:
@@ -50,38 +91,6 @@ metadata-transfer, prefill, cancellation, reasoning-effort and tool-markup
 changes—remains documented in [CHANGES.md](CHANGES.md). The dated performance
 tables below and in [RESULTS.md](RESULTS.md) preserve those measurements.
 
-## Models and launch recipes
-
-The two recipes below are equally supported with **HiCache and NIXL** on a
-single RTX PRO 6000. The linked targets are the public reference checkpoints
-for their recipes; that designation is not a claim that every checkpoint in
-this section was separately benchmarked.
-
-| Recipe | Reference target | Speculative decoding and launcher |
-|---|---|---|
-| **Flash-Next NVFP4** | [RadixArk/Qwen3.8-Flash-Next-NVFP4](https://huggingface.co/RadixArk/Qwen3.8-Flash-Next-NVFP4) | Native NEXTN MTP is included. Start with the recommended [FR-Spec launcher](configs/pennyroyal/serve-flash-next-frspec.sh); the [non-FR launcher](configs/pennyroyal/serve-flash-next.sh) remains available. No separate draft download. [Online FP8](FP8.md) and [NVMe PLE](NVME-PLE.md) are independent opt-ins. |
-| **27B FP8** | [Qwen/Qwen3.8-27B-FP8](https://huggingface.co/Qwen/Qwen3.8-27B-FP8) | Use the [27B launcher](configs/pennyroyal/serve-qwen38-27b-dflash2.sh) with the separate [incoai/Qwen3.8-27B-DFlash2](https://huggingface.co/incoai/Qwen3.8-27B-DFlash2) draft checkpoint. |
-
-The retained public 27B measurements used
-[orcarouter/Qwen3.8-27B-Uncensored-FP8](https://huggingface.co/orcarouter/Qwen3.8-27B-Uncensored-FP8),
-an uncensored/abliterated derivative of the official checkpoint. That
-provenance is material to behavioral results. Compatibility still depends on
-matching architecture, quantization, tokenizer, and speculative-decoding
-requirements.
-
-FR-Spec credit goes directly to Gabriel's
-[`gabrielolympie/sglang-flashnext-sm120`](https://github.com/gabrielolympie/sglang-flashnext-sm120).
-Both recipes pin the unmodified
-[Froggeric v22.5 template](configs/pennyroyal/templates/README.md).
-
-The v2.5.0 online-FP8 implementation is directly inspired by
-[`mratsim/sglang-qwen38fn-sm120-turbo`](https://github.com/mratsim/sglang-qwen38fn-sm120-turbo/tree/94a68214b77514bc26ef78cee4c01f128162d09b)
-at commit `94a68214b77514bc26ef78cee4c01f128162d09b`, especially patches
-`0003`, `0007`, and `0008`. Optional NVMe PLE adapts Garner McCloud's
-[SSD Stream v0.2.0](https://github.com/garnermccloud/sglang-ssd-stream/tree/176a522ef9d6dbb5056ae1f467fe49af0f1258a5),
-with the upstream license and NOTICE retained. Detailed boundaries and credit
-are in [FP8.md](FP8.md#credit) and [NVME-PLE.md](NVME-PLE.md#source-and-credit).
-
 ### Flash-Next v2.5.0 online-FP8 performance at a glance
 
 **Beyond our machine:** [Community results](COMMUNITY-RESULTS.md) collects
@@ -121,7 +130,7 @@ quality work used a separately qualified compatible checkpoint format; its
 results are not attributed to RadixArk. Format requirements are in
 [FP8.md](FP8.md#qualified-scope).
 
-### Retained v2.4.0 Flash-Next prefill measurements
+## Retained v2.4.0 Flash-Next prefill measurements
 
 Measured September 9, 2026, with **v2.4.0 and FR-Spec on one RTX PRO 6000, TP1**,
 keeping 524,288-token context, 824,384 KV tokens, and HiCache/NIXL enabled.
@@ -151,7 +160,7 @@ the rate excludes prefill and time between requests. Short replies are excluded
 from this sustained-generation figure. This is an observed session, not a
 controlled benchmark. [Session details](RESULTS.md#flash-next-agentic-session--september-6-2026).
 
-### 27B FP8 / DFlash2 performance at a glance
+## 27B FP8 / DFlash2 performance at a glance
 
 Measured September 10, 2026, during **v2.4.1 qualification on one RTX PRO 6000,
 TP1**, keeping 524,288-token context, 1,118,784-token target and draft KV pools,
@@ -168,7 +177,7 @@ Prefill uses the server's initial-prefill time, with one cold observation at
 each length. Decode medians retain all three runs. These measurements do not
 establish a speedup over an earlier release. [Results and timing details](RESULTS.md#qwen38-27bdflash2-september-10-qualification).
 
-### Broader model support without HiCache/NIXL
+## Broader model support without HiCache/NIXL
 
 **Without HiCache and NIXL, many more SGLang-supported models and speculative
 configurations can run and may benefit from applicable performance
@@ -193,7 +202,7 @@ machine—including 524K context, multimodal input, reasoning, tools, agentic
 workloads, CUDA-graph recovery, and persistent prefix restoration—but it may
 still contain rough edges or hardware/model-specific assumptions.
 
-### Hardware, storage, and first-start expectations
+## Hardware, storage, and first-start expectations
 
 The qualified launchers use a 96 GB GPU, but they also need substantial host
 RAM and disk. Flash-Next uses a 47.68 GiB PLE table in addition to its
@@ -302,6 +311,10 @@ The important work is architectural, not merely a collection of launch flags:
   decode, and real agentic behavior.
 
 ## Published identity
+
+The former `jpezzulli/qwen38-dflash2-pro6000` repository URL redirects to this
+repository. It is the earlier name of this project, not a separate runtime or
+source tree.
 
 | Item | Value |
 |---|---|

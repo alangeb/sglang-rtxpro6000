@@ -1,8 +1,9 @@
-# Optional NVMe-Backed PLE for Flash-Next
+# Qwen3.8 Flash-Next NVMe-backed PLE on RTX PRO 6000
 
 Pennyroyal v2.5.0 can stream Flash-Next's large FP8 PLE embedding table from a
 prepared local NVMe snapshot instead of pinning the table in host RAM. It is an
-**opt-in RAM-saving feature**; RAM-backed PLE remains the default.
+**opt-in RAM-saving feature** for the qualified single-GPU NVIDIA RTX PRO 6000
+Blackwell (SM120) recipe; RAM-backed PLE remains the default.
 
 The qualified table is 51,200,245,760 bytes (**47.68 GiB**) on SSD. NVMe mode
 replaces its fixed pinned-RAM residency with bounded row buffers, row-ID

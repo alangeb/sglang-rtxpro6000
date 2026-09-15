@@ -1,9 +1,10 @@
-# Community results
+# Community results for Qwen3.8 on RTX PRO 6000
 
-Pennyroyal is a home-runtime project shared publicly. These reports show how
-other people are using it: sustained agent work, different GPU variants, both
-model profiles, and multi-GPU deployments. Thank you to everyone who shared
-their configurations, measurements, and problems.
+These reports cover public Pennyroyal deployments of Qwen3.8-27B/DFlash2 and
+Qwen3.8 Flash-Next. They include NVIDIA RTX PRO 6000 Blackwell results,
+sustained agent work, different GPU variants, both model profiles, and
+multi-GPU deployments. Thank you to everyone who shared their configurations,
+measurements, and problems.
 
 **These are independent users' results, not our measurements. We have not
 independently reproduced them.** Hardware, versions, workloads, and timing

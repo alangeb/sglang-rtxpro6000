@@ -1,4 +1,4 @@
-# Provenance
+# SGLang RTX PRO 6000 source provenance
 
 ## Source identity
 
@@ -20,6 +20,8 @@ the dependency stack, CPU image preprocessing and RAM PLE by default, and the pi
 The earlier 27B dated release
 remains reachable through `qwen38-dflash2-pro6000-20260824`; its useful results
 and source lineage are also retained cumulatively in the current documentation.
+The former `jpezzulli/qwen38-dflash2-pro6000` repository URL redirects to
+`jpezzulli/sglang-rtxpro6000`; it is not a separate source tree or release line.
 
 For the v2.1.1 update, upstream `main` was inspected at
 `cdbfe90b4a31079859817c148ef4498240ec2580` on 2026-08-29. Core Flash-Next
