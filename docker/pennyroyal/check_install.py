@@ -17,7 +17,7 @@ def main():
         'torchvision': '0.28.0+cu130',
         'torchaudio': '2.11.0+cu130',
         'flashinfer-python': '0.6.17',
-        'sglang-kernel': '0.4.6.post1',
+        'sglang-kernel': '0.4.6.post1+cu130',
         'triton': '3.7.1',
         'nixl': '1.4.0',
         'nixl-cu13': '1.4.0',

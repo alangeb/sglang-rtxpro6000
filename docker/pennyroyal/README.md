@@ -14,13 +14,19 @@ supported NVIDIA GPU environment.
 
 ## Prerequisites
 
-- Linux, Docker Engine with Compose v2, an NVIDIA driver, and the NVIDIA
+- Linux, ordinary rootful Docker Engine with Compose v2, an NVIDIA driver, and the NVIDIA
   Container Toolkit configured for Docker.
 - An RTX PRO 6000 Blackwell and the model files described in
   [`BUILD.md`](../../BUILD.md#reference-and-measured-checkpoints).
 - Writable host directories for compiler/runtime caches and NIXL persistence.
   The runtime UID and GID must own them.
 - A local filesystem suitable for NIXL POSIX O_DIRECT/io_uring storage.
+
+The UID/GID examples below assume Docker without `userns-remap`. Rootless
+Docker and remapped daemons use different host/container UID mappings; adapt
+bind-directory ownership to that mapping instead of copying the example
+ownership commands unchanged. Do not switch off host-wide user namespaces
+just to use this recipe.
 
 The service is not privileged. It does use `seccomp=unconfined`, because the
 NIXL POSIX path needs io_uring and Docker's default seccomp profile commonly
@@ -29,12 +35,18 @@ required io_uring syscalls, replace this setting with that profile.
 
 ## Configure and start
 
-Work from this directory:
+Get the small launch files from the current public branch (the original
+v2.5.0 source tag predates container packaging):
 
 ```bash
-cd docker/pennyroyal
+git clone --depth 1 --branch pennyroyal-main-sm120-final \
+  https://github.com/jpezzulli/sglang-rtxpro6000.git pennyroyal
+cd pennyroyal/docker/pennyroyal
 cp .env.example .env
 ```
+
+This checkout supplies configuration and documentation; Docker pulls the
+prebuilt image. You do not build SGLang locally.
 
 Edit `.env` with the three host roots and the model paths visible below
 `/models`. Mount a common parent as `HOST_MODELS_ROOT` when checkpoint files
@@ -77,7 +89,17 @@ Set `PENNYROYAL_PROFILE` in `.env` to one of:
 | `next-plain` | Flash-Next without FR-Spec |
 | `27b` | Qwen3.8-27B target with the DFlash2 draft |
 
-The 27B profile requires both `TARGET_MODEL` and `DRAFT_MODEL`. The two Next
+For 27B, change **all three** settings in `.env`, using your actual downloaded
+directory names below `/models`:
+
+```dotenv
+PENNYROYAL_PROFILE=27b
+TARGET_MODEL=/models/Qwen3.8-27B-FP8
+DRAFT_MODEL=/models/Qwen3.8-27B-DFlash2
+```
+
+Changing the profile alone leaves the example's Flash-Next target selected;
+it does not automatically choose or download a 27B checkpoint. The two Next
 profiles use only `TARGET_MODEL`.
 
 The entrypoint also exposes two non-serving checks. The import check is
@@ -140,3 +162,21 @@ secondary preprocessing GPU. `!override` requires Docker Compose 2.24.4 or
 newer and replaces, rather than appends to, the default device reservation.
 This does not split the model. Use GPU UUIDs in `device_ids` when stable device
 selection matters.
+
+### SELinux hosts
+
+If your container engine enables SELinux confinement, ordinary UID/GID
+ownership may not be enough to read the bind mounts. Rather than recursively
+relabeling a large model directory shared with native services, add this
+per-container override to `compose.override.yaml`:
+
+```yaml
+services:
+  pennyroyal:
+    security_opt:
+      - label=disable
+```
+
+This disables SELinux separation for this container only; it does not disable
+host SELinux, make the container privileged, or change the read-only model
+mount. Omit it when your engine does not enable SELinux confinement.
