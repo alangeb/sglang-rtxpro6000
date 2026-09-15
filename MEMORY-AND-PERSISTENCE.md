@@ -23,7 +23,7 @@ The two v2.5.0 options affect different memory surfaces:
 | Option | GPU effect | Host/storage effect | Cache identity |
 |---|---|---|---|
 | Online FP8 | Selected otherwise-BF16 transformer projections, HyperConnection mix weights and `lm_head` occupy less resident GPU memory. A measured boot left 7.52 GiB available after graphs versus 3.66 GiB in the earlier matching option-off boot. | PLE placement and HiCache are unchanged. | `online_mxfp8` is part of the NIXL namespace. |
-| NVMe PLE | The qualified 824,384-token KV pool and CUDA graphs were retained. | The 47.68 GiB FP8 PLE table lives in a prepared immutable SSD overlay instead of fixed pinned RAM; bounded staging buffers and reclaimable filesystem cache remain. | Backend and overlay-manifest identity select a separate NIXL namespace. |
+| NVMe PLE | The qualified 824,384-token KV pool and CUDA graphs were retained. | The 47.68 GiB FP8 PLE table lives in a prepared immutable SSD overlay, with bounded staging buffers and reclaimable filesystem cache. | Backend and overlay-manifest identity select a separate NIXL namespace. |
 
 The online-FP8 difference is about 3.86 GiB of post-graph available VRAM; the
 7.52 GiB value is the total remaining, not the amount newly freed. The primary
@@ -31,21 +31,20 @@ FR-Spec recipe keeps 824,384 as its default cap. A separate
 `MAX_TOTAL_TOKENS=1000000` run allocated the full requested pool, retained
 524,288-token context and graphs, and passed the selected long-context,
 concurrency and CPU-media checks. It left 5.21 GiB after graphs and a minimum
-sampled 1,187 MiB during media work. This qualifies that explicit capacity
-shape, not a larger context or speed gain. Other overrides and combining the
-1,000,000-token pool with model-GPU media preprocessing remain unqualified.
+sampled 1,187 MiB during media work. The setting changes KV capacity; served
+context remains 524,288 tokens, and no speed comparison was run. The test used
+CPU media preprocessing.
 
 NVMe PLE's structural change removes the fixed 51,200,245,760-byte table from
-pinned host residency, less its bounded reader buffers. Separate snapshots
-showed about 54–56 GiB more host memory available with NVMe, but process state,
-filesystem cache and other host activity also changed; do not attribute the
-entire observed delta to PLE. The original checkpoint and prepared table must
-remain immutable while serving.
+pinned host residency, apart from bounded reader buffers. Separate snapshots
+showed about 54–56 GiB more host memory available with NVMe. Process state,
+filesystem cache, and other host activity also changed between snapshots. The
+original checkpoint and prepared table must remain immutable while serving.
 
-Online FP8 does not introduce a new persisted QSA or recurrent-state format.
-The NVFP4 expert, router and FP8 PLE-table formats remain unchanged; GDN
-recurrent state remains BF16, KV remains FP8 E4M3, and FR-Spec target/draft
-scale alignment is preserved. See [FP8.md](FP8.md) and
+Online FP8 keeps the existing persisted QSA and recurrent-state formats. The
+NVFP4 expert, router, and FP8 PLE-table formats remain unchanged; GDN recurrent
+state remains BF16, KV remains FP8 E4M3, and FR-Spec target/draft scale
+alignment is preserved. See [FP8.md](FP8.md) and
 [NVME-PLE.md](NVME-PLE.md).
 
 ## Flash-Next GPU allocation
@@ -70,12 +69,11 @@ supplied.
 
 The physical intermediate pool is genuinely absent, but the active
 `kv_cache_configurator.py::_handle_max_mamba_cache` estimator skips its reserve
-only for ReplaySSM, not for RecoverSSM `none`. No local source commit corrected
-that estimator. The qualified launcher changed `--mem-fraction-static` from
-`.97` to `.981`, approximately the recovered fraction of this GPU, so automatic
-KV sizing could use the physically freed memory. This is why the observed
-capacity increase is safe and measured, but it is not evidence that upstream
-allocation accounting is complete.
+only for ReplaySSM, not for RecoverSSM `none`. Pennyroyal has no allocator
+correction for that estimator. The launcher changed `--mem-fraction-static`
+from `.97` to `.981`, approximately the recovered fraction of this GPU, so
+automatic KV sizing could use the physically freed memory. The resulting
+capacity is measured; the upstream estimate still reserves the removed pool.
 
 The final startup allocation was:
 
@@ -108,8 +106,8 @@ on recurrent-state concurrency. Its startup allocation was:
 - speculative intermediate SSM: 5.62 GiB;
 - intermediate convolution window: 0.05 GiB.
 
-The full suite used at most 10 of 24 Mamba entries. The five-state path cap is a
-retained-prefix correctness/concurrency setting, not a decode optimization.
+The full suite used at most 10 of 24 Mamba entries. The five-state path cap
+provides retained-prefix correctness and concurrency headroom.
 
 ## HiCache and NIXL
 
@@ -121,16 +119,14 @@ GPU radix state
   -> NIXL POSIX FILE storage (io_uring + O_DIRECT)
 ```
 
-Optional NVMe-backed PLE is parallel to this cache hierarchy: it is the
-read-only source for embedding rows, not a replacement for HiCache or the NIXL
-prefix store.
+Optional NVMe-backed PLE sits beside this cache hierarchy as the read-only
+source for embedding rows. HiCache and NIXL continue to store prefix state.
 
 Flash-Next uses a 32 GB configured host tier. Its hybrid pool persists packed
 target/native-MTP KV, complete GDN state, Qwen4 PLE accepted/pending/ngram
 siblings, and compressed QSA index keys. The 27B configuration uses a 96 GB
-host setting for target KV, Mamba/GDN state, and the DFlash2 sidecar. These are
-configuration values, not claims that all hybrid pool components sum to exactly
-that number.
+host setting for target KV, Mamba/GDN state, and the DFlash2 sidecar. The tier
+sizes are configured limits rather than component-by-component memory totals.
 
 Two portable NIXL corrections are in this runtime and open upstream:
 
@@ -158,9 +154,8 @@ derives a readable directory plus a 12-character SHA-256 suffix from:
 
 The v2.5.0 Flash-Next launchers also distinguish online-FP8 state, PLE backend,
 and prepared-overlay manifest identity when applicable. An explicit KV-token
-cap is not part of the identity because it changes capacity rather than the
-stored page representation. Representation-relevant changes must not reuse an
-incompatible namespace.
+cap changes capacity without changing the stored page representation, so it is
+excluded from the identity. Representation changes require a new namespace.
 
 An exact manifest inside the root must match the derived identity. Identical
 configuration after restart selects the existing directory. A representation-
@@ -184,5 +179,5 @@ With v2.5.0 online FP8 selected, an identical saved 490K request prefetched and
 loaded back 489,984 KV tokens plus two Mamba states, recomputing only a five-
 token suffix, and returned all three keys. With NVMe PLE selected and online
 FP8 off, four concurrent saved 64K/490K requests restored 553,728 KV tokens and
-four Mamba states. These are service-restart checks; they do not make the cache
-transactional or prove every configuration across a full-machine reboot.
+four Mamba states. These checks cover service restart. Cache objects remain
+disposable, and full-machine reboot was not repeated for every configuration.

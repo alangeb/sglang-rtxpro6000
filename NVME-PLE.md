@@ -1,16 +1,16 @@
 # Qwen3.8 Flash-Next NVMe-backed PLE on RTX PRO 6000
 
 Pennyroyal v2.5.0 can stream Flash-Next's large FP8 PLE embedding table from a
-prepared local NVMe snapshot instead of pinning the table in host RAM. It is an
-**opt-in RAM-saving feature** for the qualified single-GPU NVIDIA RTX PRO 6000
-Blackwell (SM120) recipe; RAM-backed PLE remains the default.
+prepared local NVMe snapshot, removing the table's fixed pinned-RAM residency.
+The feature is optional on the single-GPU NVIDIA RTX PRO 6000 Blackwell
+(SM120) recipe; RAM-backed PLE remains the default.
 
 The qualified table is 51,200,245,760 bytes (**47.68 GiB**) on SSD. NVMe mode
 replaces its fixed pinned-RAM residency with bounded row buffers, row-ID
 staging and the reader's small native page pool. Filesystem page cache remains
-reclaimable RAM. Observed host `MemAvailable` was about **54–56 GiB higher** in
-separate snapshots, but not all of that difference can be attributed to the
-PLE table.
+reclaimable RAM. Separate snapshots showed host `MemAvailable` about
+**54–56 GiB higher** with NVMe. Process state, filesystem cache, and other host
+activity also differed between snapshots.
 
 ## Requirements and boundaries
 
@@ -21,7 +21,8 @@ PLE table.
   immutable during both preparation and serving; `TARGET_MODEL` continues to
   identify it.
 - Rust/Cargo and `uv` are needed once to build the isolated reader.
-- NVMe placement is not supported by the 27B/DFlash2 recipe.
+- NVMe placement supports Flash-Next; the 27B/DFlash2 recipe uses its existing
+  memory path.
 
 The public reference checkpoint is
 [RadixArk/Qwen3.8-Flash-Next-NVFP4](https://huggingface.co/RadixArk/Qwen3.8-Flash-Next-NVFP4).
@@ -47,9 +48,9 @@ PYTHON="$PWD/.venv/bin/python" bash tools/ple_nvme/install.sh
 ```
 
 Build tooling may download dependencies. Serving from an already prepared
-snapshot does not require network access.
+snapshot works offline.
 
-The installer deliberately refuses to overwrite an existing destination, and
+The installer refuses to overwrite an existing destination, and
 v2.5.0 rejects earlier reader builds that lack its complete hook-application
 enforcement. If you are replacing an earlier optional-reader test install,
 select a new empty directory and keep that setting for launch:
@@ -61,15 +62,15 @@ PYTHON="$PWD/.venv/bin/python" bash tools/ple_nvme/install.sh
 
 A previously prepared 48 GiB overlay can be reused when the v2.5.0 preflight
 accepts the source config/index/header identity, prepared ordinary-weight
-mapping and prepared-table checksum. It does not need to be rebuilt solely
-because the isolated reader directory changed.
+mapping, and prepared-table checksum. Changing only the isolated reader
+directory leaves the overlay valid.
 
 ## Prepare the NVMe overlay once
 
 The [preparation helper](scripts/pennyroyal/prepare_ple_nvme.py) extracts the
 PLE bytes exactly and links ordinary checkpoint files to the original snapshot.
-It does not download, quantize, or modify the source checkpoint. The output
-directory must not already exist.
+It works locally without downloading, quantizing, or modifying the source
+checkpoint. The output directory must be new.
 
 ```bash
 .venv/bin/python scripts/pennyroyal/prepare_ple_nvme.py \
@@ -96,9 +97,9 @@ The non-FR-Spec launcher accepts the same options. If the reader was installed
 outside `.ple-nvme`, also set `PENNY_PLE_PLUGIN_DIR` to that exact directory.
 
 Use `PENNY_PLE_BACKEND=ram`, or leave it unset, to use the original pinned-RAM
-path. An explicit NVMe selection never falls back silently. The plugin is
-imported only in NVMe mode, which keeps RAM-backed Flash-Next and the 27B
-launcher isolated from plugin auto-discovery.
+path. An explicit NVMe selection fails at startup on an error. The plugin loads
+only in NVMe mode; RAM-backed Flash-Next and the 27B launcher do not discover
+it automatically.
 
 ## Startup integrity and persistence
 
@@ -107,11 +108,11 @@ identity, and the prepared weight mapping. Ordinary overlay files and
 directories must remain linked to the original checkpoint, including generation,
 image and video configuration; only the deliberate PLE/index rewrites are
 excepted. The configured cache paths are active before preflight imports any
-runtime dependencies. Startup
-also reads the prepared external table sequentially to verify its checksum
-before model workers begin, so this stage can take time. It does not rehash the
-original 47.68 GiB PLE payload against the prepared table on every launch; the
-original source's immutability is a preparation-and-serving precondition. A
+runtime dependencies. Startup also reads the prepared external table
+sequentially to verify its checksum before model workers begin, so this stage
+can take time. Each launch checks the prepared table rather than rehashing the
+original 47.68 GiB PLE payload; the original source must remain immutable
+during preparation and serving. A
 changed prepared table, incompatible runtime, incomplete overlay, wrong source
 checkpoint, or required hook-application failure stops startup.
 
@@ -128,8 +129,8 @@ contention; use separate fast local devices when predictable latency matters.
 
 Both modes retained 524,288-token context, the 824,384-token KV pool, page
 size 64, native NEXTN/FR-Spec graphs, 32 GiB HiCache and NIXL. These RAM/NVMe
-measurements and the 553,728-token restore used online FP8 **off**; they are not
-combined online-FP8-plus-NVMe performance results.
+measurements and the 553,728-token restore used online FP8 **off**. Combined
+mode results are listed separately below.
 
 | PLE placement | C4 aggregate samples | Median | Host-memory observation |
 |---|---|---:|---|
@@ -139,14 +140,14 @@ combined online-FP8-plus-NVMe performance results.
 Each C4 run used four simultaneous requests with exactly 1,024 completion
 tokens per stream. Aggregate throughput includes TTFT and synchronized batch
 makespan. Both modes had a slower second run with roughly five-second TTFT.
-These were separate operational comparisons, not a randomized or fully
-cache-controlled A/B. NVMe is functional and reduces fixed host residency, but
-the evidence does **not** support a universal “no speed cost” claim.
+These were separate operational comparisons with different cache/JIT history,
+rather than a randomized or fully cache-controlled A/B. NVMe reduced fixed
+host residency and had a lower median in this comparison.
 
 NVMe mode also passed cold 64K and 490K exact-retrieval prefills, schema/tools,
-image and long image-history checks, CUDA-graph capture and restart restoration.
-Short host-wide samples do not prove that it eliminates memory compaction or
-attribute all memory pressure to Pennyroyal.
+image and long image-history checks, CUDA-graph capture, and restart
+restoration. The short host snapshots measure available memory during those
+runs; they do not isolate the source of all host-memory pressure.
 
 ### Combined with online FP8
 
@@ -169,10 +170,9 @@ runs measured 448.30, 442.15 and 438.26 tok/s synchronized aggregate (median
 first C4 aggregate was 254.35 tok/s with roughly 7.6-second TTFT. These values
 show material first-use variation.
 
-This is direct combined-option functionality and throughput evidence, not a
-fresh controlled RAM-versus-NVMe A/B. The earlier 207.12 tok/s online-FP8/RAM
-PLE C1 observation came from a different measurement window and is not a
-matched comparison.
+These runs establish combined-option function and throughput. The earlier
+207.12 tok/s online-FP8/RAM-PLE observation came from a different measurement
+window and cannot serve as a matched RAM-versus-NVMe comparison.
 
 ## Source and credit
 
@@ -186,6 +186,7 @@ source. The integration also acknowledges AntigravityAI's
 
 Pennyroyal adds explicit opt-in/fail-loud registration, exact source and model
 guards, table checksum validation, an offline exact-byte preparer, and launcher
-integration. It does not expose the upstream all-in-one CLI installer or ship a
-replacement QSA/MTP runtime payload. The adapted reader identifies itself as
-`0.2.0+pennyroyal2`; the credited upstream release remains SSD Stream v0.2.0.
+integration. It uses the isolated reader path rather than the upstream
+all-in-one CLI installer; QSA/MTP remain part of the Pennyroyal runtime. The
+adapted reader identifies itself as `0.2.0+pennyroyal2`; the credited upstream
+release remains SSD Stream v0.2.0.

@@ -5,23 +5,24 @@
 | Item | Value |
 |---|---|
 | Upstream | `https://github.com/sgl-project/sglang.git` |
-| Canonical branch | `pennyroyal-main-sm120-final` |
+| Public documentation and distribution branch | `pennyroyal-main-sm120-final`; continues above the runtime release tag |
 | Executable source HEAD | `23931293183417e750a8e41f715c52230c231c25` |
 | Integration base | `e7e78940168f3ba65c762a6f82fd8bc5b6ee04e3` |
 | Latest runtime additions | Optional online FP8 and NVMe PLE, grammar startup warmup, and loader-reference cleanup; prior history is retained |
 | Qualification dependency base | `sglang==0.5.19.dev492+g836206a0a` with the updated v2.5.0 Python/JIT source |
 | Release | v2.5.0 |
-| Git tag | `pennyroyal-v2.5.0` |
+| Release tag | `pennyroyal-v2.5.0` at `2c675da096939cb01102f8f4871bda3db55f7f28` |
+| Container build source | `b976bb329cfc1376b7d4589d55871f586d460ad4`; same executable runtime plus container packaging |
+| Container image | `ghcr.io/jpezzulli/sglang-rtxpro6000:v2.5.0` at `sha256:1d71b02dde64d3edb454fb6020b7b21bb32dee7ba0ddaacefbf9df6b266940d7` |
 
 The release includes launch recipes, documentation, and measurement summaries.
-v2.5.0 adds optional Flash-Next acceleration and SSD-backed PLE while retaining
-the dependency stack, CPU image preprocessing and RAM PLE by default, and the pinned
-[Froggeric v22.5 template](configs/pennyroyal/templates/README.md).
-The earlier 27B dated release
-remains reachable through `qwen38-dflash2-pro6000-20260824`; its useful results
-and source lineage are also retained cumulatively in the current documentation.
-The former `jpezzulli/qwen38-dflash2-pro6000` repository URL redirects to
-`jpezzulli/sglang-rtxpro6000`; it is not a separate source tree or release line.
+v2.5.0 adds optional Flash-Next acceleration and SSD-backed PLE while keeping
+the dependency stack, CPU image preprocessing, RAM PLE default, and pinned
+[Froggeric v22.5 template](configs/pennyroyal/templates/README.md). The earlier
+27B release remains available as `qwen38-dflash2-pro6000-20260824`, with its
+results and lineage preserved in the current documentation. The former
+`jpezzulli/qwen38-dflash2-pro6000` repository URL redirects to
+`jpezzulli/sglang-rtxpro6000` and shares this source history.
 
 For the v2.1.1 update, upstream `main` was inspected at
 `cdbfe90b4a31079859817c148ef4498240ec2580` on 2026-08-29. Core Flash-Next

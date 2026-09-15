@@ -1,11 +1,10 @@
 # SGLang Blackwell SM120 backends for Qwen3.8
 
-These tables map the resolved SGLang backends for Qwen3.8-27B/DFlash2 and
-Qwen3.8 Flash-Next on NVIDIA RTX PRO 6000 Blackwell (SM120). Implementations
-were observed in startup/runtime logs and confirmed in this source. “Explicit”
-means the launcher selected a narrow phase-specific backend; “source” means
-local dispatch enabled an already available path. Requested flags alone were
-not treated as resolution evidence.
+These tables map the SGLang backends resolved for Qwen3.8-27B/DFlash2 and
+Qwen3.8 Flash-Next on NVIDIA RTX PRO 6000 Blackwell (SM120). Startup/runtime
+logs and source dispatch establish the active implementation. “Explicit” means
+the launcher selects a phase-specific backend; “source” means Pennyroyal adds
+the dispatch path.
 
 ## v2.5.0 optional Flash-Next paths
 
@@ -14,13 +13,13 @@ below. Two independent options change bounded parts of that profile:
 
 | Option | Resolved implementation | What remains unchanged |
 |---|---|---|
-| `SGLANG_SM120_ONLINE_MXFP8=true` | Eligible otherwise-unquantized transformer projections use FlashInfer CUTLASS MXFP8 weights and dynamic activations. HyperConnection mix and `lm_head` use row-wise FP8 weights with per-output-row scales. | Checkpoint NVFP4 experts and routers, PLE, QSA, BF16 GDN/convolution state, FP8 KV, native NEXTN and FR-Spec mapping/scale alignment. This is not a new QSA or GDN state format. |
+| `SGLANG_SM120_ONLINE_MXFP8=true` | Eligible otherwise-unquantized transformer projections use FlashInfer CUTLASS MXFP8 weights and dynamic activations. HyperConnection mix and `lm_head` use row-wise FP8 weights with per-output-row scales. | Checkpoint NVFP4 experts and routers, PLE, QSA, BF16 GDN/convolution state, FP8 KV, native NEXTN and FR-Spec mapping/scale alignment. QSA and GDN state formats stay unchanged. |
 | `PENNY_PLE_BACKEND=nvme` | The attributed SSD Stream reader and existing PLE graph adapter stage rows from a prepared immutable local-NVMe table. | PLE values and precision, hash calculation, QSA, native MTP, attention, MoE and recurrent-state backends. RAM PLE remains the default. |
 
-Online FP8 is gated to exact SM120 and recognized Flash-Next modules.
-Unsupported hardware or selected-module shapes fail startup instead of
-silently returning to BF16. NVMe PLE is a storage-placement choice, not a new
-mathematical PLE backend; its plugin is imported only when explicitly selected.
+Online FP8 supports exact SM120 and recognized Flash-Next modules; other
+hardware and selected-module shapes fail at startup. NVMe PLE changes table
+placement while keeping the existing PLE values and math. Its plugin loads only
+when selected.
 See [FP8.md](FP8.md) and [NVME-PLE.md](NVME-PLE.md).
 
 ## v2.3 FR-Spec
@@ -33,10 +32,10 @@ The attention, GDN, MoE, and verification backends below remain in use.
 The 27B/DFlash2 launcher is unchanged. Source credit and map identity are
 listed in [PROVENANCE.md](PROVENANCE.md#v23-fr-spec-provenance).
 
-v2.4.0 keeps those backend selections. It reduces QSA prefill preparation and
+v2.4.0 keeps those backend selections. It reduces QSA prefill preparation,
 corrects short-extend bounds, removes unnecessary softmax-router allocation,
-and waits for GPU input dependencies before routing reads. The 27B model is
-dense and does not select Flash-Next's QSA or MoE-router paths.
+and waits for GPU input dependencies before routing reads. The dense 27B model
+uses its own attention and feed-forward paths.
 
 ## Qwen3.8 Flash-Next
 
@@ -47,7 +46,7 @@ dense and does not select Flash-Next's QSA or MoE-router paths.
 | Target GDN prefill | `FlashInferGDNKernel` | Explicit | 64K/490K exact tests |
 | Native-MTP draft extend | `FlashInferGDNKernel` | Explicit/shared dispatch | Native-MTP graph capture |
 | Active target MTP verification | FlashInfer WY output-only | Source | `280825c3e2`, PR #30967 adaptation; state-parity suite |
-| Ordinary/tree state-writing verification | `TritonGDNKernel` | Preserved fallback | SM120 FlashInfer full-state gate deliberately retained |
+| Ordinary/tree state-writing verification | `TritonGDNKernel` | Preserved fallback | SM120 FlashInfer full-state gate remains in place |
 | Accepted-state recovery | FlashInfer WY output-only | Source | `280825c3e2`; recovery graphs BS 1-4 |
 | QSA sparse prefill | Triton sparse GQA | Model path | `95da38fb3b` unit-scale FP8 tile fix; long prefill |
 | QSA sparse decode on SM120 | FlashInfer QSA wrapper resolving to XQA | Source/wrapper dispatch | `c1da0eef56`; direct backend probe and live decode |
@@ -83,17 +82,16 @@ dense and does not select Flash-Next's QSA or MoE-router paths.
    63/64/65, `extra_buffer`, continuation, simulated restore/retraction, and
    mutable CUDA-graph replay.
 
-3. **Gate deliberately preserved.** Ordinary FlashInfer state-writing target
+3. **State-writing gate retained.** Ordinary FlashInfer state-writing target
    verification was not globally enabled on SM120. Full/tree state-writing
    verification remains Triton. The runtime log label
    `FlashInferGDNKernel (none-mode WY output-only)` describes the active special
-   mode; it is not evidence of broad FlashInfer verification support.
+   mode; full/tree state-writing verification remains on Triton.
 
 QSA decode is a distinct case. Commit `c1da0eef56` lets SM120 enter
-FlashInfer's page-aligned QSA wrapper, but the wrapper's SM12x dispatch selects
-XQA—not TRTLLM-Gen. The throughput statement inherited from PR #36497 was
-measured while the resolver was SM100-only and is not evidence for SM120. There
-is no matched end-to-end XQA-versus-fallback percentage claim here.
+FlashInfer's page-aligned QSA wrapper, whose SM12x dispatch selects XQA. PR
+#36497 measured its throughput while the resolver was SM100-only; Pennyroyal's
+SM120 results use XQA and contain no matched XQA-versus-fallback comparison.
 
 Direct probing also established that TRTLLM-Gen is not merely hidden behind a
 conservative gate. Forced selection reports `Unsupported architecture`; after
@@ -104,9 +102,8 @@ kernel/compiler adaptation upstream of SGLang; see
 [TensorRT-LLM #11799](https://github.com/NVIDIA/TensorRT-LLM/issues/11799) and
 [FlashInfer #3628](https://github.com/flashinfer-ai/flashinfer/issues/3628).
 
-Commit `95da38fb3b` separately fixes FP8 sparse-prefill tile interpretation for
-the active unit-scale checkpoint. It does not carry the broader
-calibrated-scale work from open PR #36644.
+Commit `95da38fb3b` fixes FP8 sparse-prefill tile interpretation for the active
+unit-scale checkpoint. Open PR #36644 owns the broader calibrated-scale work.
 
 Gates intentionally left untouched include FlashInfer state-writing GDN
 verification, FlashInfer HyperConnection Mix, inactive shared-expert fusion,
@@ -132,6 +129,7 @@ and auto-selected FP4/BF16 GEMM runners.
 | HiCache transfer | NIXL POSIX | Explicit | persistent restore qualification |
 | Persistent state | target KV, Mamba/GDN, DFlash2 sidecar | Local NIXL integration | `8b786639e4`, `067c639c0a` |
 
-The 27B profile is dense, so the Flash-Next routed-expert optimizations do not
-apply to it. No separate local DeepGEMM SM120 patch is claimed. DFlash2 support
-comes from the upstream base plus the explicit XQA mask and NIXL fixes above.
+The 27B profile is dense and uses none of Flash-Next's routed-expert
+optimizations. Its measured stack has no separate local DeepGEMM SM120 patch.
+DFlash2 support comes from the upstream base plus the XQA mask and NIXL fixes
+above.
