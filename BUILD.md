@@ -4,6 +4,11 @@ Choose [Fresh install](#fresh-install) for a new environment or
 [Update an existing install](#update-an-existing-install) for a working setup.
 Both install the same source for the 27B and Flash-Next recipes.
 
+Prefer not to build locally? The [Pennyroyal container guide](docker/pennyroyal/README.md)
+uses a GitHub Actions-built image with the toolchain and NIXL POSIX plugin
+included. Models and writable caches stay in host directories. The native
+instructions below remain available and supported.
+
 ## Prerequisites
 
 Use Linux with an RTX PRO 6000 Blackwell (SM120), a working NVIDIA driver,

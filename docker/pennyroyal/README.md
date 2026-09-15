@@ -35,7 +35,7 @@ required io_uring syscalls, replace this setting with that profile.
 
 ## Configure and start
 
-Get the small launch files from the current public branch (the original
+Get the launch files from the current public branch (the original
 v2.5.0 source tag predates container packaging):
 
 ```bash

@@ -7,7 +7,8 @@ This repository contains the complete SGLang-derived source used on one
 NVIDIA RTX PRO 6000 Blackwell Workstation Edition (96 GB, SM120, TP=1). It is
 not two builds: both model configurations run from the same patched source.
 
-**Get running:** [Fresh install](BUILD.md#fresh-install) ·
+**Get running:** [Prebuilt Docker image](docker/pennyroyal/README.md) ·
+[Fresh native install](BUILD.md#fresh-install) ·
 [Update an existing install](BUILD.md#update-an-existing-install) ·
 [Choose a model](#models-and-launch-recipes) · [Launch](RUN.md).
 
