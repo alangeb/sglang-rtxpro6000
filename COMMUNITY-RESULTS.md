@@ -109,12 +109,17 @@ Those counts are batch totals, not per-request context lengths. The samples
 show CUDA graphs active and queued work keeping the server busy. Scheduler
 throughput windows are not whole-request or synchronized-batch measurements.
 
-**Scope:** these comments do not specify an exact target repository for 27B,
-source SHA, full launcher, GPU model/count, power setting, or host RAM. We do
-not infer those from other users' reports. No benchmark accuracy scores or
-full-run exports were included, so these logs establish reported throughput
-and acceptance, not reasoning/tool-quality parity or a direct comparison with
-our longer-context tests. In a separate
+**Hardware inference:** the successful exact-SM120 online-FP8 run, Flash-Next
+memory footprint, achieved throughput, and surrounding RTX PRO 6000 discussion
+strongly indicate an RTX PRO 6000 Blackwell-class configuration. The author did
+not state the exact Workstation, Server, or Max-Q variant or GPU count, so those
+remain unspecified.
+
+**Scope:** these comments also do not specify an exact target repository for
+27B, source SHA, full launcher, power setting, or host RAM. No benchmark
+accuracy scores or full-run exports were included, so these logs establish
+reported throughput and acceptance, not reasoning/tool-quality parity or a
+direct comparison with our longer-context tests. In a separate
 [configuration discussion](https://www.reddit.com/r/BlackwellPerformance/comments/1weaxdz/comment/p9c961f/),
 the author preferred RAM PLE because SSD PLE's decode tradeoff was too large
 for their use; no matched numeric comparison was supplied there.
