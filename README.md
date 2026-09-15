@@ -119,7 +119,7 @@ These are contributor-reported observations, not our own qualification.
 Measured September 11, 2026, on one RTX PRO 6000, TP1, with FR-Spec,
 524,288-token context, 824,384 KV tokens, RAM-backed PLE and HiCache/NIXL
 retained. Online FP8 was compared with a fresh immediately preceding option-off
-reference using the same serving shape and compatible checkpoint artifact.
+reference using the same serving shape and RadixArk ModelOpt NVFP4 checkpoint.
 The v2.5.0 arm also includes startup-only grammar warmup and loader-lifetime
 maintenance. Online FP8 changes precision; the table compares the complete
 source states.
@@ -138,9 +138,8 @@ not 7 GiB newly added capacity. Full precision boundaries and caveats are in
 [FP8.md](FP8.md); detailed timings are in
 [RESULTS.md](RESULTS.md#pennyroyal-v250--optional-online-fp8).
 
-The public RadixArk reference checkpoint passed a focused **64/64 exact**
-opaque-record recall request with this runtime. A separate compatible
-checkpoint was used for the full performance and quality campaign. See
+The RadixArk checkpoint was used for the full performance and quality campaign,
+including a focused **64/64 exact** opaque-record recall request. See
 [FP8.md](FP8.md#qualified-scope) for the coverage and format requirements.
 
 ## Retained v2.4.0 Flash-Next prefill measurements

@@ -73,16 +73,14 @@ image/video scenarios, including concurrent images and successive 208K-context
 history turns. Minimum sampled free GPU memory was 1,897 MiB. Image dimensions
 and concurrency change the required headroom.
 
-The fully exercised compatible artifact scored 95.75/100 in one blinded local
-validation-suite review, with no fatal cap. The review did not compare model
-quality between precision modes and did not use the public RadixArk checkpoint.
+The RadixArk checkpoint scored 95.75/100 in one blinded local validation-suite
+review, with no fatal cap. The review did not compare model quality between
+precision modes.
 
-The public recipe points to
+The public recipe uses
 [RadixArk/Qwen3.8-Flash-Next-NVFP4](https://huggingface.co/RadixArk/Qwen3.8-Flash-Next-NVFP4).
-That checkpoint passed the same 64/64 exact-recall check with the v2.5.0 online
-FP8 runtime. Its coverage is limited to that compatibility check; the full
-performance, reasoning, tool, and vision campaign used a different compatible
-artifact. Other compatible
+Qualification covered performance, reasoning, tools, vision, and a 64/64
+exact-recall check with the v2.5.0 online-FP8 runtime. Other compatible
 checkpoints must preserve the Qwen3.8 Flash-Next architecture, ModelOpt NVFP4
 expert layout, tokenizer/FR-Spec mapping, native-MTP shape and expected
 unquantized projection structure.

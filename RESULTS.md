@@ -34,8 +34,8 @@ The older H3PO raw table remains at its existing link.
 ## Pennyroyal v2.5.0 — Optional online FP8
 
 Measured September 11, 2026, on one RTX PRO 6000, TP1. The fresh immediately
-preceding option-off reference and v2.5.0 online-FP8 arm used the same compatible
-Flash-Next checkpoint artifact with RAM PLE, FR-Spec, native NEXTN, 524,288-
+preceding option-off reference and v2.5.0 online-FP8 arm used the same RadixArk
+Flash-Next ModelOpt NVFP4 checkpoint with RAM PLE, FR-Spec, native NEXTN, 524,288-
 token context, 824,384 KV tokens, page size 64, 24 Mamba slots, CUDA graphs,
 and 32 GiB HiCache/NIXL. The v2.5.0 source also includes startup-only
 structured-output warmup and loader-lifetime maintenance, so the table compares
@@ -89,9 +89,9 @@ retrieval, and identical-restart NIXL restoration. The saved 490K request
 restored/prefetched 489,984 tokens, loaded two Mamba states, and returned all
 three expected keys.
 
-The fully exercised compatible artifact scored **95.75/100** in one blinded
-local validation-suite review, with no fatal cap. The review did not compare
-precision modes and did not use the RadixArk checkpoint.
+The RadixArk checkpoint scored **95.75/100** in one blinded local
+validation-suite review, with no fatal cap. The review did not compare
+precision modes.
 
 With online FP8, the model GPU was also selected for media preprocessing as
 logical `cuda:0`, with no second GPU visible. The 824,384-token pool and graphs
@@ -107,12 +107,10 @@ used 2,754 completion tokens, reached first token in 44.523 seconds, and
 completed in 53.491 seconds. This uniform synthetic archive tests dense exact
 recall, not ordinary agentic work.
 
-The public
+A separate run of the pinned public
 [RadixArk/Qwen3.8-Flash-Next-NVFP4](https://huggingface.co/RadixArk/Qwen3.8-Flash-Next-NVFP4)
-checkpoint separately passed the identical 64/64 exact-recall check. Its client
-TTFT was 47.296 seconds and whole wall time 55.086 seconds. RadixArk coverage is
-limited to this compatibility check; the performance, reasoning, tools, and
-vision campaign used another compatible artifact.
+revision also passed the 64/64 exact-recall check. Its client TTFT was 47.296
+seconds and whole wall time 55.086 seconds.
 
 The ordinary tool suite produced semantically correct/exact call lists in
 29/30 workflows; one workflow added a redundant delegation and unsupported

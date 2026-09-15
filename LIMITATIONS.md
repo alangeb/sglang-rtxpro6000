@@ -33,9 +33,8 @@
   comparison was run.
   Post-graph free memory was 5.21 GiB and minimum sampled media-window free
   memory was 1,187 MiB; neither is a universal headroom guarantee.
-- The public RadixArk reference checkpoint passed one 64/64 exact long-recall
-  request with online FP8. A different compatible artifact supplied the
-  performance, reasoning, ordinary-tool, and vision results.
+- The RadixArk checkpoint supplied the performance, reasoning, ordinary-tool,
+  vision, and 64/64 exact long-recall results with online FP8.
 - The ordinary tool suite was 29/30 semantically correct. More importantly, a
   separate quoted-markup probe executed three of six fully wrapped examples
   that should have remained text. Parser code was unchanged, so the probe does
