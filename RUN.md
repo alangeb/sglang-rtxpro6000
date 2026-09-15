@@ -287,6 +287,11 @@ from upstream are not a qualified Pennyroyal deployment recipe.
 
 ## Startup checks
 
+Each recipe prints a Pennyroyal summary of its requested profile, memory,
+cache and media settings before starting SGLang. This is not a readiness or
+allocation result: SGLang's initialization logs report the actual KV capacity
+and request admission after profiling, which may be lower than requested.
+
 NIXL may log an open/registration error for `/nonexistent-nixl-probe`, followed
 by `path-mode FILE registration active`. That specific pair is the expected
 capability probe; errors for real cache paths still need attention.

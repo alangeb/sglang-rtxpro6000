@@ -1,0 +1,52 @@
+services:
+  pennyroyal:
+    image: ${PENNYROYAL_IMAGE:-ghcr.io/jpezzulli/sglang-rtxpro6000:v2.5.0}
+    command: ["${PENNYROYAL_PROFILE:-next}"]
+    user: "${USER_ID:-1000}:${GROUP_ID:-1000}"
+    init: true
+    restart: "no"
+    ports:
+      - "${PENNYROYAL_PORT:-8001}:8001"
+    shm_size: 16gb
+    stop_grace_period: 120s
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    security_opt:
+      # NIXL's POSIX backend uses io_uring, which Docker's default seccomp
+      # profile commonly blocks. This is narrower than privileged mode.
+      - seccomp=unconfined
+    environment:
+      TARGET_MODEL: ${TARGET_MODEL:-/models/RadixArk-Qwen3.8-Flash-Next-NVFP4}
+      DRAFT_MODEL: ${DRAFT_MODEL:-/models/Qwen3.8-27B-DFlash2}
+      CACHE_BASE: /cache
+      NIXL_STORAGE_BASE: /nixl
+      PENNY_PLE_BACKEND: ${PENNY_PLE_BACKEND:-ram}
+      PENNY_PLE_NVME_MODEL: ${PENNY_PLE_NVME_MODEL:-/models/flash-next-ple}
+      SGLANG_SM120_ONLINE_MXFP8: ${SGLANG_SM120_ONLINE_MXFP8:-false}
+      SGLANG_MM_PREPROCESS_DEVICE: ${SGLANG_MM_PREPROCESS_DEVICE:-cpu}
+    volumes:
+      - type: bind
+        source: ${HOST_MODELS_ROOT:-./models}
+        target: /models
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${HOST_CACHE_BASE:-./cache}
+        target: /cache
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${HOST_NIXL_STORAGE_BASE:-./nixl}
+        target: /nixl
+        bind:
+          create_host_path: false
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${NVIDIA_GPU:-0}"]
+              capabilities: [gpu]

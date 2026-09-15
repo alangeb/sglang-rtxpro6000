@@ -136,7 +136,7 @@ NIXL_STORAGE="$("$NAMESPACE_HELPER" \
 export SGLANG_HICACHE_NIXL_BACKEND_STORAGE_DIR="$NIXL_STORAGE"
 echo "NIXL FILE namespace: $NIXL_STORAGE"
 
-exec "$SGLANG_EXE" serve \
+launch_args=(serve \
   --model-path "$TARGET_MODEL" \
   --load-format safetensors \
   --served-model-name pennyroyal \
@@ -164,4 +164,7 @@ exec "$SGLANG_EXE" serve \
   --speculative-algorithm NEXTN --speculative-num-steps 3 \
   --speculative-eagle-topk 1 --speculative-num-draft-tokens 4 \
   --speculative-draft-model-quantization unquant \
-  --speculative-token-map "$TOKEN_MAP" --watchdog-timeout 1800
+  --speculative-token-map "$TOKEN_MAP" --watchdog-timeout 1800)
+source "$SCRIPT_DIR/startup-summary.sh"
+pennyroyal_startup_summary "${launch_args[@]}"
+exec "$SGLANG_EXE" "${launch_args[@]}"

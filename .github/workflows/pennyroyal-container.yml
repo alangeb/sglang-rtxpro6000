@@ -1,0 +1,92 @@
+name: Pennyroyal container
+
+on:
+  push:
+    branches:
+      - 'john/pennyroyal-container-*'
+  workflow_dispatch:
+    inputs:
+      promote_digest:
+        description: 'Tested image digest to tag; leave empty to build this source commit'
+        required: false
+        type: string
+      image_tag:
+        description: 'Release image tag (only used when promoting a tested digest)'
+        required: false
+        default: 'v2.5.0'
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: pennyroyal-container-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  image:
+    if: github.repository == 'jpezzulli/sglang-rtxpro6000'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      IMAGE: ghcr.io/jpezzulli/sglang-rtxpro6000
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Validate promotion request
+        if: inputs.promote_digest != ''
+        env:
+          DIGEST: ${{ inputs.promote_digest }}
+          IMAGE_TAG: ${{ inputs.image_tag }}
+        run: |
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$IMAGE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][a-zA-Z0-9]+)*$ ]]
+      - name: Make room on the disposable build runner
+        if: inputs.promote_digest == ''
+        run: |
+          # These are hosted-runner SDKs unused by this Linux/CUDA image build.
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
+          df -h /
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and upload an image for validation
+        if: inputs.promote_digest == ''
+        id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: docker/pennyroyal/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ env.IMAGE }}:build-${{ github.sha }}
+          build-args: |
+            SOURCE_REVISION=${{ github.sha }}
+          # Reuse uploaded layers without storing CUDA wheels twice in a
+          # separate exported build cache on the small hosted runner.
+          cache-from: type=registry,ref=${{ env.IMAGE }}:build-cache
+          cache-to: type=inline
+      - name: Record image and build cache
+        if: inputs.promote_digest == ''
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          docker buildx imagetools create --tag "$IMAGE:build-cache" "$IMAGE@$DIGEST"
+          echo "Image for GPU validation: $IMAGE@$DIGEST" >> "$GITHUB_STEP_SUMMARY"
+          echo "No release tag is updated by the build job." >> "$GITHUB_STEP_SUMMARY"
+      - name: Tag the tested image without rebuilding
+        if: inputs.promote_digest != ''
+        env:
+          DIGEST: ${{ inputs.promote_digest }}
+          IMAGE_TAG: ${{ inputs.image_tag }}
+        run: |
+          docker buildx imagetools create --tag "$IMAGE:$IMAGE_TAG" "$IMAGE@$DIGEST"
+          echo "Published $IMAGE:$IMAGE_TAG from tested digest $DIGEST" >> "$GITHUB_STEP_SUMMARY"

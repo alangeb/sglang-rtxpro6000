@@ -106,7 +106,7 @@ NIXL_STORAGE="$("$NAMESPACE_HELPER" \
 export SGLANG_HICACHE_NIXL_BACKEND_STORAGE_DIR="$NIXL_STORAGE"
 echo "NIXL FILE namespace: $NIXL_STORAGE"
 
-exec "$SGLANG_EXE" serve \
+launch_args=(serve \
   --warmups=structured_output \
   --model-path "$TARGET_MODEL" --load-format safetensors \
   --served-model-name pennyroyal --host 0.0.0.0 --port 8001 --tp "$TP_SIZE" \
@@ -138,4 +138,7 @@ exec "$SGLANG_EXE" serve \
   --speculative-attention-mode decode \
   --speculative-draft-attention-backend flashinfer \
   --speculative-draft-kv-cache-dtype "$DRAFT_KV_DTYPE" \
-  --watchdog-timeout 1800
+  --watchdog-timeout 1800)
+source "$SCRIPT_DIR/startup-summary.sh"
+pennyroyal_startup_summary "${launch_args[@]}"
+exec "$SGLANG_EXE" "${launch_args[@]}"
