@@ -8,18 +8,8 @@ and [`RUN.md`](../../RUN.md).
 The image is `ghcr.io/jpezzulli/sglang-rtxpro6000:v2.5.0`, built and uploaded
 by GitHub Actions. The download is approximately **8.43 GiB**, excluding models.
 Python, the CUDA toolchain, NIXL POSIX, and prebuilt FlashInfer kernels are
-included; the host supplies the NVIDIA driver. Existing native installations
-do not need to change.
-
-Both profiles passed ordinary API schema/tool checks, 64K prefill, 1,024-token
-C1/C4 decode, a JPEG spatial check, a static-video frame-path check, and NIXL
-reuse after container restart. Each restored 63,872 of 63,906 prompt tokens
-from storage and returned exact `READY`. GPU serving was checked with rootless
-Podman on one RTX PRO 6000; the supplied Docker Compose configuration was
-checked separately. These are container packaging checks, not new model-quality
-scores or a performance-improvement claim. The Next check used the RadixArk
-reference target; 27B used the measured FP8 checkpoint identified in
-[`BUILD.md`](../../BUILD.md#reference-and-measured-checkpoints).
+included; the host supplies the NVIDIA driver. Native installations remain
+independent of the container image.
 
 ## Prerequisites
 
@@ -32,24 +22,30 @@ reference target; 27B used the measured FP8 checkpoint identified in
   The runtime UID and GID must own them.
 - A local filesystem suitable for NIXL POSIX O_DIRECT/io_uring storage.
 
-The container does not reduce host RAM requirements. The Next recipe uses a
-32 GiB HiCache tier plus roughly 48 GiB for RAM-backed PLE; the 27B recipe
-reserves a 96 GiB HiCache tier. Leave additional room for loading, the runtime
-and the operating system. See [host memory and first start](../../RUN.md#host-memory-and-first-start);
-NVMe PLE is an optional way to reduce Next's host-memory use.
+Container and native profiles use the same host-memory settings:
+
+| Profile | Configured host memory |
+|---|---|
+| Flash-Next | 32 GiB HiCache plus roughly 48 GiB for RAM-backed PLE |
+| 27B/DFlash2 | 96 GiB HiCache plus runtime and draft allocations |
+
+Leave additional room for loading, the runtime, and the operating system. See
+[host memory and first start](../../RUN.md#host-memory-and-first-start). NVMe
+PLE can move Flash-Next's fixed PLE table residency to local SSD.
 
 The UID/GID examples below assume Docker without `userns-remap`. Rootless
-Docker and remapped daemons use different host/container UID mappings; adapt
-bind-directory ownership to that mapping instead of copying the example
-ownership commands unchanged. Do not switch off host-wide user namespaces
-just to use this recipe.
+Docker and remapped daemons use different host/container UID mappings. Set
+bind-directory ownership for the daemon's mapping; host-wide user-namespace
+settings can remain in place.
 
-The service is not privileged. It does use `seccomp=unconfined`, because the
-NIXL POSIX path needs io_uring and Docker's default seccomp profile commonly
-blocks it. If your daemon uses a custom profile that explicitly permits the
-required io_uring syscalls, replace this setting with that profile.
+The service runs without privileged mode. It uses `seccomp=unconfined` because
+NIXL POSIX needs io_uring, which Docker's default seccomp profile commonly
+blocks. A custom profile that permits the required io_uring syscalls can
+replace this setting.
 
-## Configure and start
+<a id="configure-and-start"></a>
+
+## Get the Compose files
 
 Get the launch files from the current public branch (the original
 v2.5.0 source tag predates container packaging):
@@ -62,40 +58,11 @@ cp .env.example .env
 ```
 
 This checkout supplies configuration and documentation; Docker pulls the
-prebuilt image. You do not build SGLang locally.
+prebuilt image; no local SGLang build is involved.
 
-Edit `.env` with the three host roots and the model paths visible below
-`/models`. Mount a common parent as `HOST_MODELS_ROOT` when checkpoint files
-are symlinks to siblings; links that escape the bind mount will be broken.
-Create the writable directories with the configured numeric identity, for
-example:
+<a id="profiles-and-checks"></a>
 
-```bash
-sudo install -d -o 1000 -g 1000 \
-  /var/cache/pennyroyal /srv/pennyroyal-nixl
-docker compose pull
-docker compose up
-```
-
-The API is published at `http://localhost:8001/v1` by default. Change
-`PENNYROYAL_PORT` for a different host port. Startup can legitimately take
-many minutes while weights, extensions, graphs, and caches initialize; the
-image health check allows a 20-minute start period. A bad configuration exits
-instead of entering an automatic restart loop.
-
-Run in the background and inspect it with:
-
-```bash
-docker compose up -d
-docker compose logs -f pennyroyal
-docker compose ps
-docker compose down
-```
-
-`down` allows up to two minutes for shutdown, then removes the container and
-network, not the three bind-mounted host directories.
-
-## Profiles and checks
+## Choose a profile and configure `.env`
 
 Set `PENNYROYAL_PROFILE` in `.env` to one of:
 
@@ -115,12 +82,66 @@ DRAFT_MODEL=/models/Qwen3.8-27B-DFlash2
 ```
 
 Changing the profile alone leaves the example's Flash-Next target selected;
-it does not automatically choose or download a 27B checkpoint. The two Next
-profiles use only `TARGET_MODEL`.
+set all three values together for 27B. The two Next profiles use only
+`TARGET_MODEL`.
 
-The entrypoint also exposes two non-serving checks. The import check is
-CPU-only and deliberately skips device work; neither command qualifies GPU
-serving:
+Set the host paths and runtime identity in the same file:
+
+| Variable | Purpose |
+|---|---|
+| `HOST_MODELS_ROOT` | Parent directory containing every referenced checkpoint path |
+| `HOST_CACHE_BASE` | Writable compiler and runtime caches |
+| `HOST_NIXL_STORAGE_BASE` | Writable persistent NIXL storage |
+| `USER_ID` / `GROUP_ID` | Numeric owner of the writable cache directories |
+| `NVIDIA_GPU` | Host GPU index or UUID used for the model |
+| `PENNYROYAL_PORT` | Host API port; defaults to `8001` |
+
+Model paths are container paths below `/models`. If checkpoint files contain
+symlinks to sibling directories, mount their common parent as
+`HOST_MODELS_ROOT`; links outside the bind mount will be broken.
+
+Create the writable directories with the configured numeric identity. For the
+example values:
+
+```bash
+sudo install -d -o 1000 -g 1000 \
+  /var/cache/pennyroyal /srv/pennyroyal-nixl
+```
+
+## Start and verify
+
+Pull the image and start in the background:
+
+```bash
+docker compose pull
+docker compose up -d
+docker compose logs -f pennyroyal
+```
+
+Startup can take many minutes while weights load, extensions compile, graphs
+capture, and caches initialize. The image health check allows a 20-minute
+start period. Configuration errors stop the container without entering a
+restart loop.
+
+The API is published at `http://localhost:8001/v1` by default. After the log
+reports readiness, use the health and chat requests in
+[`RUN.md`](../../RUN.md#smoke-through-the-normal-api).
+
+Inspect or stop the service with:
+
+```bash
+docker compose ps
+docker compose logs -f pennyroyal
+docker compose down
+```
+
+`down` allows up to two minutes for shutdown, then removes the container and
+network. The three bind-mounted host directories remain intact.
+
+## Image checks and command boundary
+
+The entrypoint exposes two non-serving checks. The CPU-only import check skips
+device work:
 
 ```bash
 docker run --rm ghcr.io/jpezzulli/sglang-rtxpro6000:v2.5.0 --help
@@ -133,16 +154,32 @@ Arbitrary commands require the explicit `exec` boundary:
 docker compose run --rm pennyroyal exec .venv/bin/python --version
 ```
 
+Both profiles passed API schema/tool checks, 64K prefill, 1,024-token C1/C4
+decode, a JPEG spatial check, a static-video frame-path check, and NIXL reuse
+after container restart. Each restored 63,872 of 63,906 prompt tokens from
+storage and returned exact `READY`. GPU serving was tested with rootless Podman
+on one RTX PRO 6000; the supplied Docker Compose configuration was checked
+separately. These checks cover container packaging and runtime function. The
+Next check used the RadixArk reference target; 27B used the measured FP8
+checkpoint in [`BUILD.md`](../../BUILD.md#reference-and-measured-checkpoints).
+
 ## Optional settings
+
+Set these values in `.env` before the first `docker compose up`. To apply a
+change to a running deployment, update `.env`, then recreate the container:
+
+```bash
+docker compose up -d --force-recreate
+```
 
 Online FP8 is off by default. Read [`FP8.md`](../../FP8.md), then set
 `SGLANG_SM120_ONLINE_MXFP8=true` to opt in. RAM-backed PLE is the default.
 
 For NVMe-backed PLE, read [`NVME-PLE.md`](../../NVME-PLE.md). The image already
 contains the isolated reader, but a prepared overlay is still required. The
-normal `/models` mount is deliberately read-only. For the one-time preparation
-only, override that mount as writable and create a new output directory under
-it (the helper refuses to overwrite an existing output):
+normal `/models` mount is read-only. For the one-time preparation, override it
+as writable and create a new output directory; the helper preserves existing
+destinations:
 
 ```bash
 docker compose run --rm --no-deps \
@@ -175,16 +212,16 @@ services:
 
 Inside the container, `cuda:0` remains the model GPU and `cuda:1` is the
 secondary preprocessing GPU. `!override` requires Docker Compose 2.24.4 or
-newer and replaces, rather than appends to, the default device reservation.
-This does not split the model. Use GPU UUIDs in `device_ids` when stable device
-selection matters.
+newer and replaces the default device reservation. The model stays on
+`cuda:0`; only preprocessing uses `cuda:1`. Use GPU UUIDs in `device_ids` when
+stable device selection matters.
 
 ### SELinux hosts
 
-If your container engine enables SELinux confinement, ordinary UID/GID
-ownership may not be enough to read the bind mounts. Rather than recursively
-relabeling a large model directory shared with native services, add this
-per-container override to `compose.override.yaml`:
+If your container engine enables SELinux confinement, UID/GID ownership alone
+may not make the bind mounts readable. Add this per-container override to
+`compose.override.yaml` when the model directory is shared with native
+services:
 
 ```yaml
 services:
@@ -193,6 +230,6 @@ services:
       - label=disable
 ```
 
-This disables SELinux separation for this container only; it does not disable
-host SELinux, make the container privileged, or change the read-only model
-mount. Omit it when your engine does not enable SELinux confinement.
+This disables SELinux separation for this container only. Host SELinux remains
+enabled, the container remains unprivileged, and the model mount remains
+read-only. Omit the override when the engine does not enforce SELinux labels.

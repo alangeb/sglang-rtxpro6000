@@ -6,10 +6,11 @@ PRO 6000. Choose [Fresh install](#fresh-install) for a new environment or
 [Update an existing install](#update-an-existing-install) for a working setup.
 Both install the same source for the two profiles.
 
-Prefer not to build locally? The [Pennyroyal container guide](docker/pennyroyal/README.md)
-uses a GitHub Actions-built image with the toolchain and NIXL POSIX plugin
-included. Models and writable caches stay in host directories. The native
-instructions below remain available and supported.
+For a prebuilt environment, use the
+[Pennyroyal container guide](docker/pennyroyal/README.md). Its GitHub
+Actions-built image includes the toolchain and NIXL POSIX plugin; models and
+writable caches remain in host directories. The rest of this page covers the
+native installation.
 
 ## Prerequisites
 
@@ -18,10 +19,9 @@ Git, `uv`, CUDA 13.3, GCC/G++ 15 and Rust. These instructions install SGLang,
 not the driver or operating-system toolchain. The
 [tested versions](#qualified-environment) are listed below.
 
-The launch recipes also require substantial host RAM and disk space; see
+The launch recipes require substantial host RAM and disk space; see
 [host memory and first start](RUN.md#host-memory-and-first-start).
-HiCache/NIXL needs the separate [NIXL POSIX installation](#nixl-posix);
-installing the SGLang Python package alone does not provide that plugin.
+HiCache/NIXL also requires the separate [NIXL POSIX installation](#nixl-posix).
 
 ## Fresh install
 
@@ -55,8 +55,8 @@ uv pip install --prerelease=allow --index-strategy unsafe-best-match \
   --no-build-isolation -e python
 ```
 
-SGLang is now installed from this checkout; no separate wheel-build/reinstall
-step is needed. Keep the checkout in place because this is an editable install.
+SGLang is now installed as an editable package from this checkout. Keep the
+checkout in place while using this environment.
 
 Next, complete [NIXL POSIX](#nixl-posix) if it is not already installed,
 [download your checkpoints](#reference-and-measured-checkpoints), then follow
@@ -64,8 +64,8 @@ Next, complete [NIXL POSIX](#nixl-posix) if it is not already installed,
 
 ## Update an existing install
 
-Use this path for an existing qualified environment, such as v2.4.1.
-Stop any server using the checkout first. Start with a clean checkout:
+Use this path for an existing Pennyroyal environment, such as v2.4.1. Stop any
+server using the checkout first. Start with a clean checkout:
 `git status --short` must be empty; save your own changes before switching tags.
 Replace the path below with your checkout. The public remote is assumed to be
 named `origin`.
@@ -90,10 +90,10 @@ export TORCHINDUCTOR_COMPILE_THREADS="${TORCHINDUCTOR_COMPILE_THREADS:-$PENNY_BU
 uv pip install --no-build-isolation --no-deps -e python
 ```
 
-This updates SGLang without re-resolving the existing dependencies. There is
-no need to rebuild PyTorch, `sglang-kernel`, FlashInfer or NIXL for the core
-v2.5.0 update. If build tools are missing, install only the bootstrap
-packages shown in the fresh-install sequence, then retry the final command.
+This updates SGLang without re-resolving the existing dependencies. The core
+v2.5.0 update reuses PyTorch, `sglang-kernel`, FlashInfer, and NIXL. If build
+tools are missing, install the bootstrap packages from the fresh-install
+sequence, then retry the final command.
 
 Restart using your existing model paths and the [launch guide](RUN.md).
 The namespace helper chooses a fresh NIXL cache identity for changed source;
@@ -101,9 +101,9 @@ do not manually point it at an older namespace.
 
 ## NIXL POSIX
 
-The qualified native NIXL build used upstream commit
+The native NIXL build used upstream commit
 `aecbc3846d92c34c7507a58d776e1fda50ff4fba`, release mode, SM120, and the
-POSIX plugin. It is not vendored here.
+POSIX plugin. Fetch it separately from its upstream repository.
 
 Its source build requires Linux, a C++20 compiler, CMake, Meson, Ninja,
 `pkg-config`, and the POSIX plugin's Linux AIO development package
@@ -139,6 +139,37 @@ O_DIRECT/io_uring configuration.
 The recorded `nixl-cu13==1.4.0` wheel SHA-256 was
 `b2d618bc9593bf78120b44f9d573af8807e83716ae8c539b0f1532cc55a55ad8`.
 
+## Reference and measured checkpoints
+
+Weights are distributed separately. Download the reference targets and the
+27B draft as needed:
+
+```bash
+hf download RadixArk/Qwen3.8-Flash-Next-NVFP4 \
+  --revision 7b719225242aacd3dbd3f9407468c2ee9a9d2594 \
+  --local-dir /path/to/flash-next
+
+hf download Qwen/Qwen3.8-27B-FP8 \
+  --local-dir /path/to/qwen38-27b-target
+
+hf download incoai/Qwen3.8-27B-DFlash2 \
+  --revision adde41d8fde3a75dc905a7df0bd5088d2a44b5a1 \
+  --local-dir /path/to/qwen38-27b-draft
+```
+
+The retained 27B performance and behavior campaign used this public
+alternative target:
+
+```bash
+hf download orcarouter/Qwen3.8-27B-Uncensored-FP8 \
+  --revision 9228df5c6c9c509e1019f83b4e085cf643118bac \
+  --local-dir /path/to/qwen38-27b-alternative-target
+```
+
+The orcarouter checkpoint is an uncensored/abliterated derivative. Its
+provenance matters for reasoning, refusal, and other behavioral results.
+Review each model card and license.
+
 ## Optional NVMe PLE reader
 
 Skip this section when using the default RAM-backed PLE. NVMe-backed PLE needs
@@ -168,36 +199,24 @@ checks, upstream license/NOTICE credit and the measured memory/performance
 tradeoff. Online FP8 needs no separate package; it is a runtime opt-in described
 in [FP8.md](FP8.md).
 
-## Reference and measured checkpoints
+## Build verification
 
-Weights are not distributed here. Download the two reference targets and the
-separate 27B draft as needed:
-
-```bash
-hf download RadixArk/Qwen3.8-Flash-Next-NVFP4 \
-  --revision 7b719225242aacd3dbd3f9407468c2ee9a9d2594 \
-  --local-dir /path/to/flash-next
-
-hf download Qwen/Qwen3.8-27B-FP8 \
-  --local-dir /path/to/qwen38-27b-target
-
-hf download incoai/Qwen3.8-27B-DFlash2 \
-  --revision adde41d8fde3a75dc905a7df0bd5088d2a44b5a1 \
-  --local-dir /path/to/qwen38-27b-draft
-```
-
-The retained 27B performance and behavior results used this public alternative
-target instead of claiming a separate benchmark of the official reference:
+Check the installed package identities from the activated environment:
 
 ```bash
-hf download orcarouter/Qwen3.8-27B-Uncensored-FP8 \
-  --revision 9228df5c6c9c509e1019f83b4e085cf643118bac \
-  --local-dir /path/to/qwen38-27b-alternative-target
+python - <<'PY'
+import importlib.metadata as m
+for name in ("sglang", "torch", "flashinfer-python", "nixl-cu13"):
+    print(name, m.version(name))
+PY
+nvcc --version
+gcc-15 --version
 ```
 
-The measured orcarouter 27B alternative is an uncensored/abliterated
-derivative. That is material to its reasoning, refusal, and behavioral results.
-Review each model card and license.
+Then start a real profile with [RUN.md](RUN.md). Confirm the resolved backends,
+KV dtypes, state pools, and CUDA graphs before measuring. `/health` verifies the
+API process; RUN lists the functional startup checks. Focused source regressions
+are recorded in [CHANGES.md](CHANGES.md).
 
 ## Advanced details
 
@@ -217,10 +236,10 @@ Review each model card and license.
 | `sglang-kernel` | `0.4.6.post1` |
 | Triton / XGrammar | `3.7.1` / `0.2.1` |
 
-These are the tested dependency versions, not a complete resolver lock.
-A fresh install can resolve newer versions of unpinned packages; compare the
-installed environment before treating it as equivalent. The native procedure
-has not been repeated as a full clean-machine build on a second host.
+These are the tested dependency versions. A fresh install can resolve newer
+versions of unpinned packages, so compare the installed environment when exact
+reproduction matters. The native procedure was reconstructed from the working
+installation; the container build supplies the clean automated build path.
 
 ### Compiler and build jobs
 
@@ -266,22 +285,3 @@ The earlier v2.1.2/v2.3 wheel from source `836206a0ad` has SHA-256
 `96cb28701ac6f2ad1523e5607218f4fa68d9f9bb26041d6f36f36e2a39362542`.
 It does not contain the later maintenance changes. See
 [PROVENANCE.md](PROVENANCE.md) for source history.
-
-## Build verification
-
-Check the installed package identities from the activated environment:
-
-```bash
-python - <<'PY'
-import importlib.metadata as m
-for name in ("sglang", "torch", "flashinfer-python", "nixl-cu13"):
-    print(name, m.version(name))
-PY
-nvcc --version
-gcc-15 --version
-```
-
-Then perform a real startup using [RUN.md](RUN.md). Check the resolved
-backends, KV dtypes, state-pool allocations and CUDA graphs before measuring;
-a healthy `/health` response alone is not a functional qualification.
-Focused source regressions are described in [CHANGES.md](CHANGES.md).
