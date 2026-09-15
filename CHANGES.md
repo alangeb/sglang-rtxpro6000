@@ -20,6 +20,16 @@ commit has not merged upstream. Where a PR has a later refined head, that is
 shown separately rather than pretending the local commit and PR head are
 identical.
 
+## Container distribution for the v2.5.0 runtime
+
+A [prebuilt Docker image](docker/pennyroyal/README.md) packages the existing
+runtime, CUDA toolchain, NIXL POSIX plugin and prebuilt FlashInfer kernels for
+both model profiles. Models and caches remain in host directories. Existing
+native installations do not need to change.
+
+The current launch recipes also print a concise profile/cache/media summary
+before startup. Their inference arguments and model settings are unchanged.
+
 ## v2.5.0 — Optional online FP8 and NVMe PLE
 
 This release keeps the two existing qualified profiles and makes the following

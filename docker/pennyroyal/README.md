@@ -5,22 +5,38 @@ as the native installation. The default is Flash-Next with FR-Spec. Native
 installation remains supported and is documented in [`BUILD.md`](../../BUILD.md)
 and [`RUN.md`](../../RUN.md).
 
-The default image is
-`ghcr.io/jpezzulli/sglang-rtxpro6000:v2.5.0`. It is an initial container
-delivery pending runtime qualification; its tag alone is not evidence that the
-container path has passed the native release's model and performance checks.
-The image can be built in CPU-only GitHub Actions, but serving requires the
-supported NVIDIA GPU environment.
+The image is `ghcr.io/jpezzulli/sglang-rtxpro6000:v2.5.0`, built and uploaded
+by GitHub Actions. The download is approximately **8.43 GiB**, excluding models.
+Python, the CUDA toolchain, NIXL POSIX, and prebuilt FlashInfer kernels are
+included; the host supplies the NVIDIA driver. Existing native installations
+do not need to change.
+
+Both profiles passed ordinary API schema/tool checks, 64K prefill, 1,024-token
+C1/C4 decode, a JPEG spatial check, a static-video frame-path check, and NIXL
+reuse after container restart. Each restored 63,872 of 63,906 prompt tokens
+from storage and returned exact `READY`. GPU serving was checked with rootless
+Podman on one RTX PRO 6000; the supplied Docker Compose configuration was
+checked separately. These are container packaging checks, not new model-quality
+scores or a performance-improvement claim. The Next check used the RadixArk
+reference target; 27B used the measured FP8 checkpoint identified in
+[`BUILD.md`](../../BUILD.md#reference-and-measured-checkpoints).
 
 ## Prerequisites
 
-- Linux, ordinary rootful Docker Engine with Compose v2, an NVIDIA driver, and the NVIDIA
+- Linux x86-64, ordinary rootful Docker Engine with Compose v2, an NVIDIA driver
+  compatible with the image's CUDA 13.3 toolkit, and the NVIDIA
   Container Toolkit configured for Docker.
 - An RTX PRO 6000 Blackwell and the model files described in
   [`BUILD.md`](../../BUILD.md#reference-and-measured-checkpoints).
 - Writable host directories for compiler/runtime caches and NIXL persistence.
   The runtime UID and GID must own them.
 - A local filesystem suitable for NIXL POSIX O_DIRECT/io_uring storage.
+
+The container does not reduce host RAM requirements. The Next recipe uses a
+32 GiB HiCache tier plus roughly 48 GiB for RAM-backed PLE; the 27B recipe
+reserves a 96 GiB HiCache tier. Leave additional room for loading, the runtime
+and the operating system. See [host memory and first start](../../RUN.md#host-memory-and-first-start);
+NVMe PLE is an optional way to reduce Next's host-memory use.
 
 The UID/GID examples below assume Docker without `userns-remap`. Rootless
 Docker and remapped daemons use different host/container UID mappings; adapt
@@ -76,8 +92,8 @@ docker compose ps
 docker compose down
 ```
 
-`down` removes the container and network, not the three bind-mounted host
-directories.
+`down` allows up to two minutes for shutdown, then removes the container and
+network, not the three bind-mounted host directories.
 
 ## Profiles and checks
 
