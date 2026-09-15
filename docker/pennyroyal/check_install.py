@@ -17,6 +17,7 @@ def main():
         'torchvision': '0.28.0+cu130',
         'torchaudio': '2.11.0+cu130',
         'flashinfer-python': '0.6.17',
+        'flashinfer-jit-cache': '0.6.17+cu130',
         'sglang-kernel': '0.4.6.post1+cu130',
         'triton': '3.7.1',
         'nixl': '1.4.0',
@@ -25,6 +26,11 @@ def main():
     installed = {name: metadata.version(name) for name in expected}
     if installed != expected or torch.version.cuda != '13.0':
         raise RuntimeError(f'Unexpected CUDA package set: {installed}, CUDA={torch.version.cuda}')
+    import flashinfer_jit_cache
+
+    moe_kernel = Path(flashinfer_jit_cache.get_jit_cache_dir()) / 'fused_moe_120/fused_moe_120.so'
+    if not moe_kernel.is_file() or moe_kernel.stat().st_size == 0:
+        raise RuntimeError('Prebuilt SM120 fused-MoE kernel is missing')
     sys.path.insert(0, str(root / '.ple-nvme'))
     import sglang_ssd_stream._io  # noqa: F401
 
