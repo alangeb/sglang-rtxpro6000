@@ -16,6 +16,7 @@ RUN dnf install -y --setopt=install_weak_deps=False --nodocs \
 ENV CUDA_HOME=/usr/local/cuda-13.3 \
     CUDACXX=/usr/local/cuda-13.3/bin/nvcc \
     CC=/usr/bin/gcc-15 CXX=/usr/bin/g++-15 CUDAHOSTCXX=/usr/bin/g++-15 \
+    NVCC_CCBIN=/usr/bin/g++-15 \
     TORCH_CUDA_ARCH_LIST=12.0 \
     PATH=/opt/pennyroyal/.venv/bin:/usr/local/cuda-13.3/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
     LD_LIBRARY_PATH=/usr/local/cuda-13.3/lib64 \

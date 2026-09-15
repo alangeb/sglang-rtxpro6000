@@ -3,7 +3,17 @@
 # isolated Torch/CUDA download. No GPU is needed for this fixed-SM120 build.
 set -euo pipefail
 build_root="$(mktemp -d /tmp/penny-nixl.XXXXXXXX)"
-trap 'rm -rf -- "$build_root"' EXIT
+cleanup() {
+  status=$?
+  # Hosted builders disappear after failure; retain the actual compiler error
+  # in Actions output before removing this script's temporary build directory.
+  if (( status != 0 )) && [[ -f "$build_root/meson/meson-logs/meson-log.txt" ]]; then
+    tail -n 100 "$build_root/meson/meson-logs/meson-log.txt" >&2
+  fi
+  rm -rf -- "$build_root"
+  exit "$status"
+}
+trap cleanup EXIT
 git clone https://github.com/ai-dynamo/nixl.git "$build_root/source"
 git -C "$build_root/source" checkout --detach aecbc3846d92c34c7507a58d776e1fda50ff4fba
 cd "$build_root/source"
