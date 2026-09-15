@@ -1,9 +1,9 @@
-# Optional Online FP8 for Flash-Next
+# Qwen3.8 Flash-Next online FP8 on RTX PRO 6000
 
 Pennyroyal v2.5.0 can convert selected Flash-Next weights to FP8 while loading
 the model. This is an **opt-in, exact-SM120 path** intended for the qualified
-single-GPU Flash-Next recipe. The default remains the checkpoint's original
-precision layout.
+single-GPU NVIDIA RTX PRO 6000 Blackwell recipe. The default remains the
+checkpoint's original precision layout.
 
 On the measured RTX PRO 6000 configuration, online FP8 improved
 single-request post-first-token throughput by **15.8–28.3%** across short,

@@ -1,9 +1,11 @@
-# Results
+# Qwen3.8 SGLang benchmarks on one RTX PRO 6000
 
-This document preserves the complete useful 27B/DFlash2 measurement record and
-adds Flash-Next as a separate configuration of the same SGLang source. Metrics
-with different timing windows are never added together or presented as one
-interchangeable throughput number.
+This results record centers on locally validated benchmarks for Qwen3.8-27B
+FP8 with DFlash2 and Qwen3.8 Flash-Next NVFP4 with native NEXTN and FR-Spec on
+one NVIDIA RTX PRO 6000 Blackwell 96 GB GPU (SM120). Clearly labeled external
+results retain their contributors' different hardware and validation scope.
+Metrics with different timing windows are never added together or presented as
+one interchangeable throughput number.
 
 **Looking for other users' experience?** [Community results](COMMUNITY-RESULTS.md)
 keeps credited external field reports separate from our measurements, including

@@ -1,9 +1,11 @@
-# Resolved Backends and SM120 Enablement
+# SGLang Blackwell SM120 backends for Qwen3.8
 
-These tables describe implementations observed in startup/runtime logs and
-confirmed in this source. “Explicit” means the launcher selected a narrow
-phase-specific backend; “source” means local dispatch enabled an already
-available path. Requested flags alone were not treated as resolution evidence.
+These tables map the resolved SGLang backends for Qwen3.8-27B/DFlash2 and
+Qwen3.8 Flash-Next on NVIDIA RTX PRO 6000 Blackwell (SM120). Implementations
+were observed in startup/runtime logs and confirmed in this source. “Explicit”
+means the launcher selected a narrow phase-specific backend; “source” means
+local dispatch enabled an already available path. Requested flags alone were
+not treated as resolution evidence.
 
 ## v2.5.0 optional Flash-Next paths
 

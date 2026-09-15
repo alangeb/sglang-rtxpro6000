@@ -1,8 +1,10 @@
-# Run
+# Run Qwen3.8 with SGLang on one RTX PRO 6000 Blackwell
 
-Both model profiles use the same built source and expose the model as
-`pennyroyal` on an OpenAI-compatible endpoint. Set the paths below before
-running a launcher; systemd service files are not included.
+These qualified single-GPU recipes run Qwen3.8-27B FP8 with DFlash2 or Qwen3.8
+Flash-Next NVFP4 with native NEXTN and FR-Spec from the same Pennyroyal SGLang
+source on an NVIDIA RTX PRO 6000 Blackwell 96 GB GPU (SM120). Both profiles
+expose the model as `pennyroyal` on an OpenAI-compatible endpoint. Set the paths
+below before running a launcher; systemd service files are not included.
 
 ## Common setup
 
