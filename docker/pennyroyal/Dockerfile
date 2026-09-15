@@ -48,7 +48,7 @@ RUN export SETUPTOOLS_SCM_PRETEND_VERSION_FOR_SGLANG="0.5.19+g${SOURCE_REVISION:
       --python .venv/bin/python --prerelease=allow --index-strategy unsafe-best-match \
       --extra-index-url https://download.pytorch.org/whl/cu130 \
       --extra-index-url https://docs.sglang.ai/whl/cu130/ \
-      --constraint docker/pennyroyal/constraints.txt --no-build-isolation -e python \
+      --constraint docker/pennyroyal/constraints.txt --no-build-isolation-package sglang -e python \
     && rm -rf /tmp/penny-cargo
 # NIXL POSIX and optional NVMe PLE reader are built from pinned/vendored source.
 RUN bash docker/pennyroyal/build-nixl.sh \
