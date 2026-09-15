@@ -17,6 +17,17 @@ not two builds: both model configurations run from the same patched source.
 [Community-reported results](COMMUNITY-RESULTS.md) ·
 [Validation suite and published reports](https://github.com/jpezzulli/pennyroyal-validation).
 
+## Prebuilt Docker image for Qwen3.8 on RTX PRO 6000
+
+**Pennyroyal v2.5.0 is now available as a prebuilt Docker image** for both
+Qwen3.8 Flash-Next NVFP4/NEXTN and Qwen3.8-27B FP8/DFlash2, with HiCache and
+NIXL. No local SGLang build is required; model files and caches stay in mounted
+host directories. Native installation remains supported.
+
+**[Docker and Compose setup](docker/pennyroyal/README.md)** ·
+Image: `ghcr.io/jpezzulli/sglang-rtxpro6000:v2.5.0` ·
+Approximately **8.43 GiB** to download, excluding models.
+
 <a id="models-and-launch-recipes"></a>
 
 ## Qualified model profiles and launch recipes
@@ -221,8 +232,9 @@ namespaces are preserved rather than silently deleted.
 The first launch can appear quiet while checkpoint identities are hashed, then
 spend substantial time compiling kernels and capturing CUDA graphs. Wait for
 the server-ready log and verify the API; a cold namespace will not restore an
-older prefix. The qualified path is the native build in [BUILD.md](BUILD.md).
-Docker material inherited from upstream is not a qualified Pennyroyal recipe.
+older prefix. Choose the [native build](BUILD.md) or the dedicated
+[Pennyroyal Docker image](docker/pennyroyal/README.md). The separate Docker
+material inherited from upstream is not the qualified Pennyroyal recipe.
 
 ## v2.3 — Faster Flash-Next decoding with FR-Spec
 
