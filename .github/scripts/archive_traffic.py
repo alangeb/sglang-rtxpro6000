@@ -209,6 +209,7 @@ def render(history, raw, snapshot_path):
         if not raw[kind]:
             lines.append('| No entries returned by GitHub | — | — |')
     lines += ['', f'[Latest full snapshot]({snapshot_path}) · [Daily JSON](daily.json) · '
+              '[GHCR package downloads](PACKAGE-DOWNLOADS.md) · '
               '[Immutable first-run raw responses](raw/first-run/)', '',
               'Snapshots retain the aggregate totals, daily arrays, referrers and popular paths as '
               'reported together in each collection. They overlap and must not be added together.', '',
