@@ -46,6 +46,9 @@ exact checkpoints used for each benchmark campaign.
 | **Qwen3.8 Flash-Next** | NVFP4 target with FP8 KV | Native NEXTN MTP with FR-Spec | [RadixArk/Qwen3.8-Flash-Next-NVFP4](https://huggingface.co/RadixArk/Qwen3.8-Flash-Next-NVFP4); no separate draft | [Recommended FR-Spec recipe](RUN.md#launch-flash-next-with-fr-spec) or [non-FR alternative](RUN.md#launch-flash-next-without-fr-spec-alternative) |
 | **Qwen3.8-27B** | FP8 target and KV | DFlash2 | [Qwen/Qwen3.8-27B-FP8](https://huggingface.co/Qwen/Qwen3.8-27B-FP8) with [incoai/Qwen3.8-27B-DFlash2](https://huggingface.co/incoai/Qwen3.8-27B-DFlash2) | [27B/DFlash2 recipe](RUN.md#launch-27b-with-dflash2) |
 
+For Flash-Next, our [OrcaRouter Uncensored ModelOpt NVFP4 conversion](https://huggingface.co/jpezzulli/OrcaRouter-Qwen3.8-Flash-Next-Uncensored-ModelOpt-NVFP4)
+is also available by community request and works with the same Pennyroyal launch recipe.
+
 [Online FP8](FP8.md) and [NVMe-backed PLE](NVME-PLE.md) are independent
 Flash-Next options.
 
