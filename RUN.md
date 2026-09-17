@@ -103,6 +103,15 @@ apply.
 
 Run one profile at a time on a single GPU.
 
+### Unknown tool names
+
+The qualified launchers default `SGLANG_FORWARD_UNKNOWN_TOOLS=true`. A native
+tool call whose name is absent from the request's tool definitions reaches the
+API consumer's executor, which can return an error for the model to correct and
+retry. Markdown fenced tool examples remain text, and forwarding does not
+execute anything by itself. Set `SGLANG_FORWARD_UNKNOWN_TOOLS=false` before a
+native launch, or in the Compose `.env`, to opt out.
+
 ## Smoke through the normal API
 
 Wait for SGLang to report readiness, then check health and send a normal chat
