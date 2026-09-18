@@ -765,3 +765,42 @@ persistent prefix storage.
 
 The SGLang-derived source remains under Apache-2.0. Model checkpoints and
 third-party runtimes retain their own licenses.
+
+## Pennyroyal fork: Mamba host-spill patch
+
+This fork (`alangeb/sglang-rtxpro6000`, branch **`mamba-host-anchor`**, commit `321653fdd`)
+adds a **Mamba host-tier anchor** on top of upstream `pennyroyal-main-sm120-final`.
+
+### Why
+Upstream (issue #33713) treated the hierarchical-cache host tier as FULL-KV-only, so for hybrid
+Mamba+KV models the Mamba state was dropped the moment its KV slice was evicted — making the host
+tier a silent no-op for Mamba models. This patch makes a host-resident Mamba copy a first-class
+survival anchor and decouples the Mamba host budget from the KV ratio.
+
+### What it does (all env-flag gated; default OFF = byte-identical to upstream)
+- `SGLANG_MAMBA_HOST_ANCHOR=1` — master switch: a Mamba host copy alone keeps a tree node alive
+  (widens the `backuped`/`evicted`/host-leaf/reclaim predicates and the aux-only load-back path).
+- `SGLANG_MAMBA_PER_SLOT=1` — per-slot device-anchor mode (drops MAMBA from the device match validators).
+- `SGLANG_MAMBA_HOST_DEBUG=1` — observability logging (anchor producer, aux-only loads, load-back attribution).
+- `SGLANG_MAMBA_HOST_SIZE_GB=N` — host-tier size override (additive; KV+QSA keep the full hicache budget).
+- `SGLANG_MAMBA_SPILL_LOW_WATER=N` — proactive device->host spill trigger (default 4; 0 disables).
+- Plus a bounds-check guard on mamba slot ids before the transfer kernel, and a fix so the scheduler
+  replays the load producer index when `load()` already drained the queue.
+
+All edits are behind the flags above; with no flags set the code path is byte-identical to upstream,
+so rebasing over upstream merges stays mechanical. 9 files, +272/-7.
+
+### How to enable at launch
+Export the flags in the launcher environment before running a `configs/pennyroyal/serve-*.sh` script,
+e.g. `SGLANG_MAMBA_HOST_ANCHOR=1 SGLANG_MAMBA_HOST_SIZE_GB=32`. The NIXL namespace is derived from the
+git revision, so this source gets a fresh cache identity (do not point it at an older namespace).
+
+### Prebuilt Docker image
+A local container image bakes this exact commit:
+
+    image: **sglang-rtxpro6000:mamba-host-anchor**   (OCI revision 321653fddd44163bce56b439fbb4b18ce49b9aad)
+
+Built from `docker/pennyroyal/Dockerfile` with `SOURCE_REPOSITORY=https://github.com/alangeb/sglang-rtxpro6000.git`
+and `SOURCE_REVISION=321653fddd44163bce56b439fbb4b18ce49b9aad`. To host it, point the `../llms` pennyroyal compose
+at it via `PENNYROYAL_IMAGE=sglang-rtxpro6000:mamba-host-anchor` (see `../llms/pro6000/docker_sglang_q38_flash_next_pennyroyal`).
+The mamba flags still must be set in the container env (e.g. compose `environment:` / an env file).
