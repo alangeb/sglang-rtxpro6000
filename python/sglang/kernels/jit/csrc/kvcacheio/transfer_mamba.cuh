@@ -28,6 +28,7 @@ struct MambaTransferParams {
   int64_t num_layers;
 };
 
+// P2-D6 JIT-PROBE: content hash of this file is the JIT cache key.
 __global__
 __launch_bounds__(kBlockSize, 1) void transfer_mamba_load_kernel(const __grid_constant__ MambaTransferParams params) {
   const int tid = threadIdx.x;

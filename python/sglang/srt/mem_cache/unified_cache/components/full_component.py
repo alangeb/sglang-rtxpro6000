@@ -18,6 +18,11 @@ from sglang.srt.mem_cache.hicache_storage import (
     PoolTransferResult,
 )
 from sglang.srt.mem_cache.unified_cache.cache_action import FreeComponentDeviceSlot
+from sglang.srt.mem_cache.unified_cache.component_type import (
+    host_anchored,
+    mamba_host_anchor_enabled,
+    mamba_host_debug_enabled,
+)
 from sglang.srt.mem_cache.unified_cache.components.tree_component import (
     CacheTransferPhase,
     ComponentType,
@@ -34,6 +39,11 @@ if TYPE_CHECKING:
         NodeId,
         UnifiedTreeNode,
     )
+
+
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class FullComponent(TreeComponent):
@@ -246,6 +256,10 @@ class FullComponent(TreeComponent):
             _, x = heapq.heappop(heap)
             if x not in self.tree_core.evictable_host_leaves:
                 continue
+            if mamba_host_anchor_enabled() and x.component_data[ct].host_value is None:
+                # P3-2: KV host pressure may only free KV host bytes; a node
+                # anchored on a Mamba host row alone has nothing for us to free.
+                continue
             self.tree_core._evict_host_leaf(x, tracker, device_frees, host_frees)
             if (
                 x.parent is not None
@@ -367,7 +381,22 @@ class FullComponent(TreeComponent):
             cur = node
             while cur.evicted:
                 cd = cur.component_data[ct]
-                assert cd.host_value is not None
+                # P1: under SGLANG_MAMBA_HOST_ANCHOR a node may be anchored on a
+                # Mamba host copy alone; then the FULL walk stops here and the
+                # KV transfer is simply empty (aux transfers still load).
+                if cd.host_value is None:
+                    if host_anchored(cur):
+                        if mamba_host_debug_enabled():
+                            logger.info(
+                                "[MAMBA-HOST] aux-only load_back: FULL host copy gone "
+                                "at node=%s (kv_tokens truncated to %d)",
+                                cur.id, len(backed_up),
+                            )
+                        break
+                    raise AssertionError(
+                        "Full host value missing on evicted node "
+                        f"{cur.id} (not host-anchored)"
+                    )
                 backed_up.append(cd.host_value)
                 nodes.append(cur)
                 cur = cur.parent

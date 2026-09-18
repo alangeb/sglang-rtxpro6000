@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable, Optional
@@ -747,7 +749,22 @@ def build_hybrid_mamba_stack(
                 * mamba_device_bytes
                 / total_device_bytes
             )
-            kv_qsa_budget = get_memory().hicache_size - mamba_host_size
+            # P3-3: decouple the Mamba host tier from the KV ratio (flag, or
+            # env for A/B). Additive in the QSA path: when the override is
+            # active the KV+QSA budget keeps the full hicache size and the
+            # mamba host tier is added on top (no carve-out from the kv
+            # budget); right before build_kv_host_pool.
+            _mh = int(getattr(server_args, "mamba_host_size", 0) or 0)
+            _env_mh = float(os.environ.get("SGLANG_MAMBA_HOST_SIZE_GB", "0") or 0)
+            if _env_mh > 0:
+                _mh = _env_mh
+            if _mh > 0:
+                mamba_host_size = _mh
+            kv_qsa_budget = (
+                get_memory().hicache_size
+                if _mh > 0
+                else get_memory().hicache_size - mamba_host_size
+            )
             kv_bytes_per_token = (
                 kv_pool.head_dim
                 * kv_pool.head_num

@@ -35,6 +35,9 @@ from sglang.srt.mem_cache.hicache_storage import (
 from sglang.srt.mem_cache.l2_transfer import L2Transfer
 from sglang.srt.mem_cache.pool_host import HostPoolGroup, PoolEntry
 from sglang.srt.mem_cache.pool_host.mha import MHATokenToKVPoolHost
+from sglang.srt.mem_cache.unified_cache.component_type import (
+    mamba_host_anchor_enabled,
+)
 
 if TYPE_CHECKING:
     from sglang.srt.mem_cache.allocator import BaseTokenToKVPoolAllocator
@@ -87,6 +90,7 @@ class PrefetchOperation(StorageOperation):
     def is_terminated(self) -> bool:
         with self._lock:
             return self._terminated_flag
+
 
 
 class HybridCacheController(BaseHiCacheController):
@@ -537,6 +541,28 @@ class HybridCacheController(BaseHiCacheController):
                 pool_transfers=pool_transfers or None,
             )
         )
+        if mamba_host_anchor_enabled():
+            # P2-D5: kick the H->D copy off now and publish its finish event so the
+            # forward stream can wait_event() on it instead of racing the copy
+            # (upstream PR #36743 class). Event wait, never a device synchronize.
+            try:
+                _pid = self.start_loading()
+                if _pid >= 0 and self.ack_load_queue:
+                    # P2-D5 fix: stash the producer index; the scheduler's later
+                    # ready_to_load_host_cache() -> start_loading() sees the
+                    # already-drained queue and would return -1, replayed in
+                    # UnifiedRadixCache.ready_to_load_host_cache() instead.
+                    self.mamba_pending_producer_index = _pid
+                    self.mamba_pending_load_event = self.ack_load_queue[
+                        -1
+                    ].finish_event
+                    self._d5_pub = getattr(self, "_d5_pub", 0) + 1
+                    if self._d5_pub <= 3:
+                        logger.info(
+                            "[MAMBA-HOST] D5 event published n=%d", self._d5_pub
+                        )
+            except Exception:  # never break the load path
+                logger.exception("[MAMBA-HOST] start_loading() in load() failed")
         return device_indices
 
     def prefetch(

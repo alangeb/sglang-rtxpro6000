@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import atexit
 import logging
+import os
 import threading
 import time
 from dataclasses import replace
@@ -1433,6 +1434,27 @@ class UnifiedRadixCache(BasePrefixCache):
                 ancestor_lock_params=ancestor_lock_params,
                 host_anchor_params=host_anchor_params,
             )
+            if success and os.environ.get("SGLANG_MAMBA_PER_SLOT", "0") == "1":
+                # Per-pool load-back counter: attribute each host->device restore
+                # to the KV (FULL) pool vs the Mamba pool so production can tell
+                # which tier a restore came from. The Prometheus counter
+                # sglang:load_back_tokens_total{pool="kv"|"mamba"} already carries
+                # the per-pool token counts (HybridCacheController._num_tokens_by_pool);
+                # this adds a cumulative count + a rate-capped log so the restore
+                # attribution is visible without scraping. Flag-gated: inert at 0.
+                counts = getattr(self, "_loadback_pool_counts", None)
+                if counts is None:
+                    counts = self._loadback_pool_counts = {"kv": 0, "mamba": 0, "n": 0}
+                counts["kv"] += 1
+                _mprep = preps.get(ComponentType.MAMBA)
+                if _mprep is not None and _mprep.allocated_mamba_slot is not None:
+                    counts["mamba"] += 1
+                counts["n"] += 1
+                if counts["n"] <= 3 or counts["n"] % 64 == 0:
+                    logger.info(
+                        "[MAMBA-HOST] load-back node=%s kv=%d mamba=%d n=%d",
+                        node_id, counts["kv"], counts["mamba"], counts["n"],
+                    )
             return success
         finally:
             for comp in self._components_tuple:
@@ -2719,7 +2741,21 @@ class UnifiedRadixCache(BasePrefixCache):
     def ready_to_load_host_cache(self) -> int:
         """Notify the cache controller to start the KV cache loading."""
         if self.cache_controller is not None:
-            return self.cache_controller.start_loading()
+            idx = self.cache_controller.start_loading()
+            if idx < 0:
+                # P2-D5 fix: HybridCacheController.load() may have already run
+                # start_loading() (mamba-anchor path), draining the queue, so
+                # this poll would return -1 and leave hicache_consumer_index=-1
+                # -- the forward could then read KV/mamba still in flight.
+                # Replay the stashed producer index and clear it. Flag-off
+                # path never stashes, so behavior is unchanged there.
+                pending = getattr(
+                    self.cache_controller, "mamba_pending_producer_index", None
+                )
+                if pending is not None:
+                    self.cache_controller.mamba_pending_producer_index = None
+                    return pending
+            return idx
         return 0
 
     def is_load_back_event_done(self, consumer_index: int) -> bool:

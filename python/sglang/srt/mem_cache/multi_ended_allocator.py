@@ -392,6 +392,11 @@ class MultiEndedAllocator(BaseTokenToKVPoolAllocator):
         """Gap bytes a peer urgent flush would release. Only `_free_phys_pages`
         count — NOT `_pending_reuse` (awaiting an event) — so the credit is realizable.
         """
+        # EDIT 4 (S0, byte-neutral mamba-hole): under SGLANG_MAMBA_PER_SLOT, do not credit
+        # peer (mamba) drainable holes to the FULL side. Strictly conservative: never
+        # over-credits, never leaks. Default OFF -> existing behavior EXACTLY unchanged.
+        if os.environ.get("SGLANG_MAMBA_PER_SLOT", "0") == "1":
+            return 0
         peer = self._peer
         if peer is None or not peer.lazy_compaction:
             return 0

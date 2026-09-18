@@ -16,6 +16,7 @@ cache for cache-level logic, but the TreeCore itself never touches it.
 
 from __future__ import annotations
 
+import os
 import logging
 import sys
 from array import array
@@ -49,6 +50,11 @@ from sglang.srt.mem_cache.unified_cache.cache_action import (
     ComponentAction,
     FreeDeviceKV,
     ReplaceWriteThroughOnNodeSplit,
+)
+from sglang.srt.mem_cache.unified_cache.component_type import (
+    host_anchored,
+    mamba_host_anchor_enabled,
+    mamba_host_debug_enabled,
 )
 from sglang.srt.mem_cache.unified_cache.components import (
     _NUM_COMPONENT_TYPES,
@@ -689,9 +695,18 @@ class UnifiedTreeCore(UnifiedTreeCoreInterface):
             validators = tuple(
                 comp.create_match_validator() for comp in self.components
             )
+            # EDIT (per-slot tree fix, flag-gated): the device anchor indexes the FULL
+            # chunk list (UTC:720-721,769); gating it on MAMBA desyncs it from the
+            # FULL-only insert (UTC:938-1007) -> URC:828 prefix/new_indices mismatch.
+            # Under SGLANG_MAMBA_PER_SLOT, drop MAMBA's device validator so the anchor
+            # advances on FULL device chunks alone. Flag OFF -> filter always True
+            # (byte-identical to cand-p8). Mamba host-hit is handled separately
+            # (MC:187-192 -> init_load_back -> prepare_load_back -> MAMBA-only H->D).
+            _per_slot = os.environ.get("SGLANG_MAMBA_PER_SLOT", "0") == "1"
             device_validators = tuple(
                 comp.create_match_validator(match_device_only=True)
                 for comp in self.components
+                if not (_per_slot and comp.component_type is ComponentType.MAMBA)
             )
         else:
             validators = tuple(
@@ -721,8 +736,10 @@ class UnifiedTreeCore(UnifiedTreeCoreInterface):
         while len(key) > 0 and child_key in node.children:
             child = node.children[child_key]
 
-            # HiCache: dead node (evicted + not backuped) — stop traversal
-            if child.evicted and not child.backuped:
+            # HiCache: dead node (evicted + not backuped) — stop traversal.
+            # P1: a Mamba host copy anchors the node too, so keep walking and let
+            # the Mamba validator credit the host hit (SGLANG_MAMBA_HOST_ANCHOR).
+            if child.evicted and not (child.backuped or host_anchored(child)):
                 break
 
             prefix_len = child.key.match(key, page_size=self.page_size)
@@ -1446,6 +1463,19 @@ class UnifiedTreeCore(UnifiedTreeCoreInterface):
         """Free only the Full host layer; aux host slices stay under their own
         pools' LRU (a host-only aux slice may be a sole copy)."""
         assert self._can_reclaim_full_host_duplicate(node)
+        if mamba_host_debug_enabled():
+            aux_host = {
+                int(ct): node.component_data[ct].host_value is not None
+                for ct in node.component_types
+                if ct != int(BASE_COMPONENT_TYPE)
+            }
+            logger.info(
+                "[MAMBA-HOST] producer: released FULL host duplicate node=%s "
+                "aux_host_kept=%s anchor=%s",
+                node.id,
+                aux_host,
+                host_anchored(node),
+            )
         self.kv_events.record_remove(node, medium=StorageMedium.CPU)
         self._evict_component_and_detach_lru(
             node,
@@ -1472,6 +1502,9 @@ class UnifiedTreeCore(UnifiedTreeCoreInterface):
         assert self._is_host_leaf(node), f"node {node.id} is not an H-leaf"
 
         self.kv_events.record_remove(node, medium=StorageMedium.CPU)
+        # : no retain_mamba. FULL host and MAMBA host are freed together on
+        # a host-leaf eviction, then the node is deleted; no mamba-host-only
+        # survivor is allowed.
         for comp in self.components:
             _, hf = self._evict_component_and_detach_lru(
                 node,
@@ -1505,7 +1538,7 @@ class UnifiedTreeCore(UnifiedTreeCoreInterface):
         device_frees: dict[ComponentType, list[torch.Tensor]],
         host_frees: dict[ComponentType, list[torch.Tensor]],
     ) -> None:
-        assert not node.evicted and node.backuped
+        assert not node.evicted and (node.backuped or host_anchored(node))
         trigger = self.components_by_type[BASE_COMPONENT_TYPE]
         self._evict_component_and_detach_lru(
             node,
@@ -1723,7 +1756,8 @@ class UnifiedTreeCore(UnifiedTreeCoreInterface):
         marks need no check: marked nodes are never ``evicted``."""
         if node is self.root_node or not node.evicted:
             return False
-        if not node.backuped:
+        # P1: Mamba host copy is a sufficient anchor on its own.
+        if not (node.backuped or host_anchored(node)):
             return False
         if any(cd.host_lock_ref > 0 for cd in node.component_data):
             return False
