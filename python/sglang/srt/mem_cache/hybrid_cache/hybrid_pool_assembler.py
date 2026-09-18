@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 import logging
 import os
 from dataclasses import dataclass, field
@@ -148,6 +150,40 @@ def _split_hicache_size(
         hicache_size * size_bytes / total_device_pool_size
         for size_bytes in device_pool_sizes
     )
+
+
+def _explicit_mamba_host_size_gb() -> float:
+    """Absolute host-Mamba tier size, or 0.0 when unset.
+
+    ``SGLANG_MAMBA_HOST_SIZE_GB`` sizes ``MambaPoolHost`` directly instead of
+    taking the proportional (device-bytes) share of ``--hicache-size``. It is
+    ADDITIVE: the KV/QSA host tier keeps the full hicache budget and the Mamba
+    tier is layered on top, so raising it never shrinks KV retention. That
+    differs from ``SGLANG_HICACHE_MAMBA_EXTRA_GB``, which moves gigabytes from
+    KV to Mamba *inside* the hicache total.
+
+    Raises instead of silently no-op'ing when the host tier would not exist:
+    the host pools (and the KV anchor that Mamba backups ride on) are only
+    built when a hicache budget is configured.
+    """
+    raw = os.environ.get("SGLANG_MAMBA_HOST_SIZE_GB", "")
+    if not raw:
+        return 0.0
+    try:
+        gb = float(raw)
+    except ValueError:
+        logger.warning("Ignoring invalid SGLANG_MAMBA_HOST_SIZE_GB=%r", raw)
+        return 0.0
+    if gb <= 0:
+        return 0.0
+    if get_memory().hicache_size <= 0:
+        raise ValueError(
+            f"SGLANG_MAMBA_HOST_SIZE_GB={gb} requires a hierarchical-cache host "
+            f"budget: got --hicache-size={get_memory().hicache_size}. Set "
+            "--hicache-size to the KV/QSA host budget you want; the Mamba host "
+            "tier is added on top of it (it is not carved out of it)."
+        )
+    return gb
 
 
 def _bias_mamba_host_size(mamba_host_size: float) -> float:
@@ -759,9 +795,15 @@ def build_hybrid_mamba_stack(
             kv_host_size, mamba_host_size = _split_hicache_size(
                 get_memory().hicache_size, (kv_pool, mamba_pool)
             )
-            biased = _bias_mamba_host_size(mamba_host_size)
-            kv_host_size = max(0.0, kv_host_size - (biased - mamba_host_size))
-            mamba_host_size = biased
+            explicit_mamba_gb = _explicit_mamba_host_size_gb()
+            if explicit_mamba_gb > 0:
+                # Additive: KV keeps the whole hicache budget (see helper).
+                kv_host_size = float(get_memory().hicache_size)
+                mamba_host_size = explicit_mamba_gb
+            else:
+                biased = _bias_mamba_host_size(mamba_host_size)
+                kv_host_size = max(0.0, kv_host_size - (biased - mamba_host_size))
+                mamba_host_size = biased
         else:
             qsa_pools = (qsa_pool, *mtp_qsa_device_pools)
             kv_device_bytes = sum(kv_pool.get_kv_size_bytes()) + sum(
@@ -777,8 +819,19 @@ def build_hybrid_mamba_stack(
             mamba_host_size = (
                 get_memory().hicache_size * mamba_device_bytes / total_device_bytes
             )
-            mamba_host_size = _bias_mamba_host_size(mamba_host_size)
-            kv_qsa_budget = get_memory().hicache_size - mamba_host_size
+            explicit_mamba_gb = _explicit_mamba_host_size_gb()
+            if explicit_mamba_gb > 0:
+                # Explicit sizing is ADDITIVE: the KV/QSA host tier keeps the
+                # whole --hicache-size budget and the Mamba host tier is layered
+                # on top, so tuning Mamba never shrinks KV retention. The v3
+                # SGLANG_HICACHE_MAMBA_EXTRA_GB bias is skipped: it moves GB
+                # *within* the hicache budget, which is not what an absolute
+                # size means.
+                mamba_host_size = explicit_mamba_gb
+                kv_qsa_budget = get_memory().hicache_size
+            else:
+                mamba_host_size = _bias_mamba_host_size(mamba_host_size)
+                kv_qsa_budget = get_memory().hicache_size - mamba_host_size
             kv_bytes_per_token = (
                 kv_pool.head_dim
                 * kv_pool.head_num
@@ -915,6 +968,15 @@ def build_hybrid_mamba_swa_stack(
         kv_host_size, swa_host_size, mamba_host_size = _split_hicache_size(
             get_memory().hicache_size, (full_kv_pool, swa_kv_pool, mamba_pool)
         )
+        explicit_mamba_gb = _explicit_mamba_host_size_gb()
+        if explicit_mamba_gb > 0:
+            # Additive: KV/SWA split the whole hicache budget between
+            # themselves (see helper), Mamba is layered on top.
+            budget = float(get_memory().hicache_size)
+            kv_share = kv_host_size / (kv_host_size + swa_host_size)
+            kv_host_size = budget * kv_share
+            swa_host_size = budget - kv_host_size
+            mamba_host_size = explicit_mamba_gb
     kv_host_pool = build_kv_host_pool(
         kv_pool=full_kv_pool,
         page_size=page_size,
