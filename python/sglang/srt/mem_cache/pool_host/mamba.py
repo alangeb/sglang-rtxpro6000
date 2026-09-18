@@ -489,6 +489,7 @@ class MambaPoolHost(HostKVCache):
                 item_size=item_size,
                 dst_layout_dim=item_size * num_layers,
                 num_layers=num_layers,
+                src_bound=int(src_layers[0].size(0)),
             )
         elif io_backend == "direct":
             src_ptrs = [src_layers[i] for i in range(num_layers)]

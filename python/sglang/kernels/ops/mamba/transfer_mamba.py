@@ -13,7 +13,7 @@ JIT compilation behavior across all JIT kernels.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 from sglang.kernels.jit.utils import cache_once, load_jit
 from sglang.kernels.kernel_api_logging import debug_kernel_api
@@ -103,8 +103,15 @@ def transfer_kv_mamba_lf_pf(
     dst_layout_dim: int,
     num_layers: int,
     num_warps_per_item: int = 32,
+    src_bound: Optional[int] = None,
 ):
-    _guard_indices("lf_pf.src", src_indices, dst.size(0))
+    # lf_pf is the backup path (device layer_first -> host page_first):
+    # src_indices are DEVICE slot ids, dst_indices are HOST slot ids.
+    # src_ptrs is a (num_layers,) pointer tensor and carries no slot count,
+    # so the caller supplies the device-side bound. Falling back to
+    # dst.size(0) (host size) mis-bounds legal device slots when the host
+    # tier is smaller than the device tier.
+    _guard_indices("lf_pf.src", src_indices, src_bound if src_bound is not None else dst.size(0))
     _guard_indices("lf_pf.dst", dst_indices, dst.size(0))
     module = _jit_transfer_mamba_module()
     module.transfer_kv_mamba_lf_pf(
