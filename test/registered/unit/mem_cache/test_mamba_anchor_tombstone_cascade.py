@@ -140,7 +140,7 @@ class TestMambaAnchorTombstoneCascade(unittest.TestCase):
         out = core.collect_full_device_indices(c.id, a.id)
         self.assertEqual(out.numel(), 0, "must degrade to empty restore")
 
-    def test_collect_walkoff_root_degrades(self):
+    def test_collect_unrestorable_value_none_degrades(self):
         # until_node not on from_node's ancestor chain (the production crash
         # shape): must degrade to empty instead of AttributeError on None.
         self._flag(True)
