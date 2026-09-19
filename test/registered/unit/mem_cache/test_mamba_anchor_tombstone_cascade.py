@@ -6,9 +6,9 @@ node, but the tombstone cascade decided survival from FULL alone and deleted
 that bridge, severing the ancestor chain under init_load_back ->
 collect_full_device_indices walked off the root (AttributeError on None).
 
-Fix under test: the cascade now keeps host_anchored() nodes alive (mirrors the
-match guard), and collect_full_device_indices degrades to an empty restore
-instead of crashing. Both no-op when the flag is off (default = upstream).
+Fix under test: the cascade now keeps host_anchored() nodes alive (mirrors
+the match guard), and collect_full_device_indices degrades to an empty
+restore instead of crashing. Both no-op when the flag is off (default).
 """
 
 import unittest
@@ -40,7 +40,10 @@ def _node(parent, token: int, *, full=None, mamba=None):
     node.key = RadixKey(array("q", range(token, token + 1)))
     if parent is not None:
         parent.children[node.key.child_key(1)] = node
-    for comp_type, residence in ((ComponentType.FULL, full), (ComponentType.MAMBA, mamba)):
+    for comp_type, residence in (
+        (ComponentType.FULL, full),
+        (ComponentType.MAMBA, mamba),
+    ):
         cd = node.component_data[comp_type]
         value = torch.tensor([token], dtype=torch.int64)
         if residence == "device":
@@ -51,7 +54,11 @@ def _node(parent, token: int, *, full=None, mamba=None):
 
 
 class _FakeCore:
-    """Minimal `self` for the two UnifiedTreeCore methods under test."""
+    """Minimal `self` running the REAL UnifiedTreeCore methods unbound."""
+
+    _is_host_leaf = UnifiedTreeCore._is_host_leaf
+    _can_reclaim_full_host_duplicate = UnifiedTreeCore._can_reclaim_full_host_duplicate
+    collect_full_device_indices = UnifiedTreeCore.collect_full_device_indices
 
     def __init__(self):
         self.root_node = _node(None, 0, full="device")
@@ -82,9 +89,6 @@ class _FakeCore:
         # itself owns further deletion/upward walking. Keep node.parent intact.
         key = node.key.child_key(self.page_size)
         node.parent.children.pop(key, None)
-
-    # real method reused verbatim (called unbound in helpers)
-    collect_full_device_indices = UnifiedTreeCore.collect_full_device_indices
 
 
 class TestMambaAnchorTombstoneCascade(unittest.TestCase):
@@ -136,6 +140,14 @@ class TestMambaAnchorTombstoneCascade(unittest.TestCase):
         out = core.collect_full_device_indices(c.id, a.id)
         self.assertEqual(out.numel(), 0, "must degrade to empty restore")
 
+    def test_collect_walkoff_root_degrades(self):
+        # until_node not on from_node's ancestor chain (the production crash
+        # shape): must degrade to empty instead of AttributeError on None.
+        self._flag(True)
+        core, a, b, c = self._chain()
+        out = core.collect_full_device_indices(b.id, a.id)  # b FULL value None
+        self.assertEqual(out.numel(), 0)
+
     def test_collect_normal_chain_unaffected_flag_on(self):
         self._flag(True)
         core = _FakeCore()
@@ -143,7 +155,6 @@ class TestMambaAnchorTombstoneCascade(unittest.TestCase):
         a = _node(core.root_node, 10, full="device")
         b = _node(a, 20, full="device")
         core._register(a), core._register(b)
-        # until_node==a: only b's value is collected (root order).
         out = core.collect_full_device_indices(b.id, a.id)
         self.assertEqual(out.tolist(), [20])
 
@@ -157,6 +168,41 @@ class TestMambaAnchorTombstoneCascade(unittest.TestCase):
             core._register(a), core._register(b)
             out = core.collect_full_device_indices(b.id, core.root_node.id)
             self.assertEqual(out.tolist(), [10, 20], f"flag={on}")
+
+    def test_host_leaf_membership_anchor_lock_and_flag_semantics(self):
+        core = _FakeCore()
+        root = core.root_node
+        a = _node(root, 10, full="device", mamba="device")
+        b = _node(a, 20, mamba="host")  # anchored-only H-leaf candidate
+        # Flag off: not host-backed -> not an H-leaf (upstream semantics).
+        self._flag(False)
+        self.assertFalse(core._is_host_leaf(b))
+        # Flag on, unlocked: anchor qualifies as host-backed leaf.
+        self._flag(True)
+        self.assertTrue(core._is_host_leaf(b))
+        # Flag on but host-locked: not currently evictable.
+        b.component_data[ComponentType.MAMBA].host_lock_ref = 2
+        self.assertFalse(core._is_host_leaf(b))
+
+    def test_duplicate_reclaim_guards(self):
+        self._flag(True)
+        core = _FakeCore()
+        root = core.root_node
+        a = _node(root, 10, full="device", mamba="device")
+        a.component_data[ComponentType.FULL].host_value = torch.tensor([10])
+        # Settled duplicate -> reclaimable (anchor-skip is the CALLER's job).
+        self.assertTrue(core._can_reclaim_full_host_duplicate(a))
+        # In-flight load-back -> never reclaimable (upstream DMA guard).
+        a.load_back_pending_id = 7
+        self.assertFalse(core._can_reclaim_full_host_duplicate(a))
+        a.load_back_pending_id = None
+        # Host-locked -> not reclaimable.
+        a.component_data[ComponentType.FULL].host_lock_ref = 1
+        self.assertFalse(core._can_reclaim_full_host_duplicate(a))
+        a.component_data[ComponentType.FULL].host_lock_ref = 0
+        # Mamba-host-only bridge (no FULL copies) -> not a duplicate.
+        b = _node(a, 20, mamba="host")
+        self.assertFalse(core._can_reclaim_full_host_duplicate(b))
 
 
 if __name__ == "__main__":
