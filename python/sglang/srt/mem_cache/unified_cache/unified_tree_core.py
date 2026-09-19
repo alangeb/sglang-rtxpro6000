@@ -843,11 +843,24 @@ class UnifiedTreeCore(UnifiedTreeCoreInterface):
         until_node = self.node_by_id(until_node_id)
         prefix_chunks: list[torch.Tensor] = []
         node = self.node_by_id(from_node_id)
-        while node is not until_node:
+        # Upstream invariant: until_node is an ancestor of from_node, so the
+        # root guard never fires and the FULL value is never None with the
+        # mamba flag off (byte-identical). With SGLANG_MAMBA_HOST_ANCHOR on, a
+        # Mamba-host-only bridge between until_node and from_node can make the
+        # FULL chain un-walkable; degrade to an empty restore (host miss)
+        # instead of killing the scheduler.
+        while node is not None and node is not until_node and node is not self.root_node:
             value = node.component_data[BASE_COMPONENT_TYPE].value
-            assert value is not None
+            if value is None:
+                if not mamba_host_anchor_enabled():
+                    assert value is not None  # upstream invariant, flag-off
+                return self._empty_match_result.device_indices
             prefix_chunks.append(value)
             node = node.parent
+        if node is not until_node:
+            # chain walk overran root / a detached node: anchor-space only,
+            # unreachable with the flag off (upstream ancestor invariant).
+            return self._empty_match_result.device_indices
         if not prefix_chunks:
             return self._empty_match_result.device_indices
         prefix_chunks.reverse()
@@ -1315,7 +1328,9 @@ class UnifiedTreeCore(UnifiedTreeCoreInterface):
         for desc in reversed(descendants):
             # Host-only by construction: a device descendant would contradict
             # this node being a D-leaf, and D-leaves evict before ancestors.
-            assert desc.evicted and desc.backuped, f"node {desc.id} not host-only"
+            assert (
+                desc.evicted and (desc.backuped or host_anchored(desc))
+            ), f"node {desc.id} not host-only"
             assert desc.write_through_pending_id is None
             self._release_all_component_layers(
                 desc,
@@ -1709,6 +1724,17 @@ class UnifiedTreeCore(UnifiedTreeCoreInterface):
                     )
 
             if has_host:
+                self._update_evictable_leaf_sets(cur)
+                break
+
+            # Mamba host-anchor (SGLANG_MAMBA_HOST_ANCHOR): a node kept alive by
+            # a Mamba host copy is a bridge the match walk (above, widened at
+            # the P1 guard) may still be standing on. Deleting it here would
+            # sever best_match's ancestor chain under an in-flight load-back
+            # (production crash 2026-09-19: collect_full_device_indices walked
+            # off the root). host_anchored() returns False with the flag off,
+            # so the default cascade stays byte-identical to upstream.
+            if host_anchored(cur):
                 self._update_evictable_leaf_sets(cur)
                 break
 
