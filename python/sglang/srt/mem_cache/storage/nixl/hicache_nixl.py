@@ -20,10 +20,17 @@ from sglang.srt.mem_cache.hicache_storage import (
 )
 from sglang.srt.mem_cache.pool_host import HostKVCache
 from sglang.srt.mem_cache.storage.mmap import alloc_mmap
-from sglang.srt.mem_cache.storage.nixl.nixl_cleaner import HiCacheL3Cleaner
+from sglang.srt.mem_cache.storage.nixl.nixl_cleaner import (
+    GIBIBYTE,
+    HiCacheL3Cleaner,
+)
 
 from .nixl_registry import NixlRegistry
-from .nixl_utils import NixlBackendConfig, NixlBackendSelection, NixlFileManager
+from .nixl_utils import (
+    NixlBackendConfig,
+    NixlBackendSelection,
+    NixlFileManager,
+)
 
 try:
     from nixl._api import nixl_agent, nixl_agent_config, nixlBind
@@ -173,6 +180,7 @@ class HiCacheNixl(HiCacheStorage):
                 tp_rank,
                 high_watermark=cleaner_config["high_watermark"],
                 low_watermark=cleaner_config["low_watermark"],
+                max_cache_bytes=cleaner_config["max_cache_gb"] * GIBIBYTE,
             )
             if (
                 cleanup_dirs
