@@ -81,6 +81,45 @@ class MockHybridPool:
         return True
 
 
+class MockSlotSiblingHybridPool(MockHybridPool):
+    """Mamba-style pool whose slot siblings widen the component set.
+
+    Mirrors MambaPoolHost: get_page_buffer_meta exposes temporal + conv +
+    sibling pointers per page and get_storage_component_names reports all of
+    them, while the legacy 1+len(conv_buffer) counting would miss the sibling.
+    """
+
+    def __init__(self, num_pages: int = 4, page_size: int = 1, component_bytes: int = 8):
+        super().__init__(
+            num_pages=num_pages,
+            page_size=page_size,
+            component_bytes=component_bytes,
+            expose_zero_copy=True,
+        )
+        self.slot_sibling_buffer = torch.zeros(
+            (num_pages * page_size, component_bytes), dtype=self.dtype
+        )
+
+    def _get_hybrid_pool_buffer(self):
+        return [self.temporal_buffer, *self.conv_buffer, self.slot_sibling_buffer]
+
+    def get_page_buffer_meta(self, indices):
+        ptr_list = []
+        size_list = []
+        for index in indices.tolist():
+            for buf in (
+                self.temporal_buffer,
+                self.conv_buffer[0],
+                self.slot_sibling_buffer,
+            ):
+                ptr_list.append(buf[index].data_ptr())
+                size_list.append(buf[index].numel())
+        return ptr_list, size_list
+
+    def get_storage_component_names(self):
+        return ["temporal", "conv_0", "slot_sibling"]
+
+
 class MockMixedStateHybridPool:
     """Hybrid pool whose serialized page is raw bytes, not ``pool.dtype``."""
 
@@ -770,6 +809,64 @@ class TestNixlUnified(CustomTestCase):
             [
                 self.hicache._get_suffixed_key("p0") + "_mamba_temporal",
                 self.hicache._get_suffixed_key("p0") + "_mamba_ple_ngram",
+            ],
+        )
+
+    def test_get_hybrid_key_multiplier_counts_slot_siblings(self):
+        """Component inventory (incl. slot siblings) wins over ad-hoc counts."""
+        pool = MockSlotSiblingHybridPool()
+        self.assertEqual(
+            self.hicache._get_hybrid_key_multiplier(PoolName.MAMBA, pool), 3
+        )
+
+    def test_get_hybrid_key_multiplier_fallbacks_preserved(self):
+        """Pools without the component-name API keep the legacy counting."""
+        pool = MockHybridPool(expose_zero_copy=True)
+        self.assertFalse(hasattr(pool, "get_storage_component_names"))
+        self.assertEqual(
+            self.hicache._get_hybrid_key_multiplier(PoolName.MAMBA, pool), 2
+        )
+
+        class _KV:
+            v_buffer = object()
+
+        self.assertEqual(self.hicache._get_hybrid_key_multiplier(PoolName.SWA, _KV()), 2)
+
+        class _Plain:
+            pass
+
+        self.assertEqual(self.hicache._get_hybrid_key_multiplier(PoolName.KV, _Plain()), 1)
+
+    def test_batch_exists_v2_expands_sibling_component_keys(self):
+        """Exists check must agree with the pool's real per-page components."""
+        pool = MockSlotSiblingHybridPool()
+        self.hicache.register_mem_host_pool_v2(pool, PoolName.MAMBA)
+
+        queried = []
+
+        def fake_query(keys):
+            queried.append(list(keys))
+            return [True] * len(keys)
+
+        self.hicache._query_keys_exist = fake_query
+        result = self.hicache.batch_exists_v2(
+            ["p0", "p1"],
+            [
+                PoolTransfer(
+                    name=PoolName.MAMBA,
+                    keys=["p0", "p1"],
+                    host_indices=torch.tensor([0, 1], dtype=torch.int64),
+                )
+            ],
+        )
+        self.assertEqual(result.kv_hit_pages, 2)
+        self.assertEqual(result.extra_pool_hit_pages[PoolName.MAMBA], 2)
+        self.assertEqual(
+            queried[-1],
+            [
+                self.hicache._get_suffixed_key(key) + f"_mamba_{name}"
+                for key in ("p0", "p1")
+                for name in ("temporal", "conv_0", "slot_sibling")
             ],
         )
 
