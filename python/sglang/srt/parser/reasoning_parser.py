@@ -1,3 +1,4 @@
+import copy
 import inspect
 import json
 import re
@@ -396,6 +397,82 @@ class DeepSeekR1Detector(BaseReasoningFormatDetector):
         # https://github.com/sgl-project/sglang/pull/3202#discussion_r1950153599
 
 
+class _ReasoningCodeQuotes:
+    """Small streaming Markdown state; never retains the reasoning history.
+
+    Delimiter runs can cross chunks. Resolve them on the next character so
+    a split double backtick cannot briefly close a single-backtick span.
+    """
+
+    def __init__(self):
+        self.inline_ticks = 0
+        self.fence = None
+        self.fence_length = 0
+        self.closing_fence = False
+        self.line_indent = 0
+        self.escaped = False
+        self.run_marker = None
+        self.run_length = 0
+        self.run_at_line_start = False
+
+    def advance(self, char):
+        if self.run_marker is not None and char != self.run_marker:
+            marker, length = self.run_marker, self.run_length
+            if self.fence is not None:
+                if (
+                    marker == self.fence
+                    and self.run_at_line_start
+                    and length >= self.fence_length
+                ):
+                    self.closing_fence = True
+            elif self.inline_ticks:
+                if marker == "`" and length == self.inline_ticks:
+                    self.inline_ticks = 0
+            elif self.run_at_line_start and length >= 3:
+                self.fence, self.fence_length = marker, length
+            elif marker == "`":
+                self.inline_ticks = length
+            self.run_marker = None
+            self.run_length = 0
+
+        if self.closing_fence and char not in " \t\r\n":
+            self.closing_fence = False
+        quoted = bool(self.inline_ticks or self.fence)
+        if char in "`~" and not (self.escaped and not quoted):
+            if self.run_marker == char:
+                self.run_length += 1
+            elif char == "`" or (
+                not self.inline_ticks
+                and (self.fence == "~" or self.line_indent <= 3)
+            ):
+                self.run_marker = char
+                self.run_length = 1
+                self.run_at_line_start = self.line_indent <= 3
+            quoted = quoted or self.run_marker is not None
+
+        # Backslashes escape opening backticks only outside code. Inside a
+        # Markdown code span they are ordinary bytes.
+        self.escaped = char == "\\" and not self.escaped and not quoted
+        if char == "\n":
+            if self.closing_fence:
+                self.fence = None
+                self.closing_fence = False
+            self.line_indent = 0
+        elif char == " " and self.line_indent <= 3:
+            self.line_indent += 1
+        else:
+            self.line_indent = 4
+        return quoted
+
+    def consume(self, text):
+        for char in text:
+            self.advance(char)
+
+    def mask(self, text):
+        preview = copy.copy(self)
+        return "".join(" " if preview.advance(char) else char for char in text)
+
+
 class Qwen3Detector(BaseReasoningFormatDetector):
     """
     Detector for Qwen3 models (e.g., Qwen/Qwen3-235B-A22B).
@@ -442,6 +519,32 @@ class Qwen3Detector(BaseReasoningFormatDetector):
             force_nonempty_content=force_nonempty_content,
         )
 
+        self._reasoning_quotes = _ReasoningCodeQuotes()
+        if self._in_reasoning:
+            self._reasoning_quotes.consume(self.previous_content)
+
+    def parse_streaming_increment(self, new_text: str) -> StreamingParseResult:
+        result = super().parse_streaming_increment(new_text)
+        if self.__class__ is Qwen3Detector:
+            # Only emitted reasoning advances the committed quote state.
+            # Buffered marker suffixes are scanned again on the next chunk.
+            self._reasoning_quotes.consume(result.reasoning_text)
+        return result
+
+    def _find_tool_start(self, text: str) -> Tuple[int, Optional[bool]]:
+        if self.__class__ is not Qwen3Detector:
+            return super()._find_tool_start(text)
+        unquoted = self._reasoning_quotes.mask(text)
+        search_from = 0
+        while True:
+            index = unquoted.find(self.tool_start_token, search_from)
+            if index == -1:
+                return -1, None
+            confirmed = self._tool_start_confirmed(text[index:])
+            if confirmed is not False:
+                return index, confirmed
+            search_from = index + len(self.tool_start_token)
+
     def _tool_start_confirmed(self, remainder: str) -> Optional[bool]:
         """Require a supported Qwen payload after ``<tool_call>``.
 
@@ -468,7 +571,9 @@ class Qwen3Detector(BaseReasoningFormatDetector):
         if self.__class__ is not Qwen3Detector or tool_idx == -1:
             return super()._find_think_end(text, tool_idx)
 
-        payload_spans = self._tool_payload_spans(text)
+        # Earlier tool markers were rejected or inside quoted reasoning.
+        # An incomplete quoted example must not mask a real reasoning end.
+        payload_spans = self._tool_payload_spans(text, search_from=tool_idx)
         search_from = 0
         while True:
             end_idx = text.find(self.think_end_token, search_from)
@@ -481,13 +586,14 @@ class Qwen3Detector(BaseReasoningFormatDetector):
                 return end_idx
             search_from = end_idx + len(self.think_end_token)
 
-    def _tool_payload_spans(self, text: str) -> List[Tuple[int, Optional[int]]]:
-        """Return complete or pending Qwen payload spans in the current buffer."""
+    def _tool_payload_spans(
+        self, text: str, search_from: int = 0
+    ) -> List[Tuple[int, Optional[int]]]:
+        """Return Qwen payload spans from the first unquoted candidate onward."""
         tool_start_token = self.tool_start_token
         assert tool_start_token is not None
 
         spans = []
-        search_from = 0
         while True:
             start = text.find(tool_start_token, search_from)
             if start == -1:
