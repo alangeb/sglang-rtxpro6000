@@ -28,6 +28,7 @@ from sglang.srt.mem_cache.unified_cache.components.tree_component import (
     ComponentType,
     EvictLayer,
     TreeComponent,
+    next_component_uuid,
 )
 
 if TYPE_CHECKING:
@@ -152,6 +153,14 @@ class FullComponent(TreeComponent):
         new_parent.component_data[ct].lock_ref = child.component_data[ct].lock_ref
         new_parent.component_data[ct].session_ref = child.component_data[ct].session_ref
         child_cd = child.component_data[ct]
+        # A Full host lock is a segment, not a single node: a zero-copy storage
+        # SET may still be reading the host blocks that this split hands to the
+        # prefix fragment, so the fragment inherits the lock count and the
+        # segment boundary moves to it.
+        new_parent.component_data[ct].host_lock_ref = child_cd.host_lock_ref
+        host_uuid = child_cd.metadata.pop("host_uuid", None)
+        if host_uuid is not None:
+            new_parent.component_data[ct].metadata["host_uuid"] = host_uuid
         assert new_parent.component_data[ct].session_ids is None
         split_len = len(new_parent.key)
         if child_cd.value is not None:
@@ -284,6 +293,9 @@ class FullComponent(TreeComponent):
             # write_back mode: the anchor may be device-only (no host_value); pin it anyway.
             if cd.host_value is None and not self.tree_core.is_write_back:
                 return result
+            if cd.metadata.get("host_uuid") is None:
+                cd.metadata["host_uuid"] = next_component_uuid()
+            result.full_uuid_for_host_lock = cd.metadata["host_uuid"]
             cd.host_lock_ref += 1
             self.tree_core._update_evictable_leaf_sets(node)
             return result
@@ -322,14 +334,26 @@ class FullComponent(TreeComponent):
     ) -> None:
         ct = self.component_type
         if lock_host:
-            cd = node.component_data[ct]
-            if cd.host_lock_ref == 0:
+            boundary_uuid = params.full_uuid_for_host_lock if params else None
+            # None means this receipt never acquired the Full host lock.
+            if boundary_uuid is None:
                 return
-            # Mirror of `acquire`. write_back uses a pure counter.
-            if cd.host_value is None and not self.tree_core.is_write_back:
-                return
-            cd.host_lock_ref -= 1
-            self.tree_core._update_evictable_leaf_sets(node)
+            # Walk the fragment chain created by splits after the lock was
+            # taken; every fragment carries a copy of it, and the boundary
+            # UUID sits on the outermost (prefix) fragment.
+            root = self.tree_core.root_node
+            while node is not None and node is not root:
+                cd = node.component_data[ct]
+                # Mirror of `acquire`. write_back uses a pure counter.
+                if cd.host_value is None and not self.tree_core.is_write_back:
+                    return
+                if cd.host_lock_ref == 0:
+                    return
+                cd.host_lock_ref -= 1
+                self.tree_core._update_evictable_leaf_sets(node)
+                if cd.metadata.get("host_uuid") == boundary_uuid:
+                    return
+                node = node.parent
             return
 
         root = self.tree_core.root_node

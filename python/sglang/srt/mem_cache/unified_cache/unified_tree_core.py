@@ -878,10 +878,23 @@ class UnifiedTreeCore(UnifiedTreeCoreInterface):
         self, node: UnifiedTreeNode, chunked: bool = False
     ) -> bool:
         """Increment hit count; check whether a write backup should be fired."""
-        if node.evicted or chunked:
+        if node.evicted:
             return False
         if self.is_write_back:
             return False
+        if chunked:
+            # A chunked request must not count its own in-flight prefix as a
+            # hit. Under write_through (threshold 1) that self-hit was the only
+            # thing between a fresh prefix and eviction, so schedule its backup
+            # directly. Under write_through_selective (threshold > 1) a node
+            # still has to earn persistence from real repeat hits, so a
+            # chunked insert fires nothing and stays out of hit accounting.
+            return (
+                self.enable_hicache
+                and self.write_through_threshold <= 1
+                and not node.backuped
+                and node.write_through_pending_id is None
+            )
         node.hit_count += 1
         return (
             self.enable_hicache

@@ -3977,20 +3977,20 @@ class UnifiedRadixCacheSuite:
         # each evict() attempts the drop fallback on the parent.
         with mock.patch.object(cache.cache_controller, "write", return_value=None):
             # Pinned subtree root: drop declines, chain stays intact.
-            cache.inc_host_lock_ref(parent.id)
+            parent_host_lock = cache.inc_host_lock_ref(parent.id).to_dec_params()
             result = cache.evict(EvictParams(num_tokens=len(parent_seq)))
             self.assertEqual(result.num_tokens_evicted, 0)
-            cache.dec_host_lock_ref(parent.id)
+            cache.dec_host_lock_ref(parent.id, parent_host_lock)
 
             # Pinned host-only descendant: drop declines as well.
-            cache.inc_host_lock_ref(child.id)
+            child_host_lock = cache.inc_host_lock_ref(child.id).to_dec_params()
             result = cache.evict(EvictParams(num_tokens=len(parent_seq)))
             self.assertEqual(result.num_tokens_evicted, 0)
             m = cache.match_prefix(
                 MatchPrefixParams(key=RadixKey(array("q", parent_seq)))
             )
             self.assertEqual(len(m.device_indices), len(parent_seq))
-            cache.dec_host_lock_ref(child.id)
+            cache.dec_host_lock_ref(child.id, child_host_lock)
 
             # Unpinned: the subtree drops and the child's host slots return.
             result = cache.evict(EvictParams(num_tokens=len(parent_seq)))

@@ -1311,6 +1311,14 @@ class UnifiedRadixCache(BasePrefixCache):
             return 0
         written = 0
         for node_id in action.node_ids:
+            if not write_back and (
+                self.tree_core.node_by_id(node_id).write_through_pending_id
+                is not None
+            ):
+                # A backup for this node is already in flight (overlapping
+                # chain actions reach it again); its ack publishes the host
+                # copy. A second one would allocate orphaned host slots.
+                continue
             device_value, comp_xfers = self.tree_core.build_backup_spec(node_id)
             # Overlapping chain actions may revisit nodes with Full KV already
             # backed up. Skip only when no transfer remains.
