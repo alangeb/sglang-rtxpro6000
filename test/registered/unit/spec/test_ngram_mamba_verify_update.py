@@ -227,6 +227,82 @@ class TestNgramMambaVerifyUpdate(CustomTestCase):
             )
         )
 
+    def test_kda_replayssm_fold_track_step_boundary(self):
+        """The KDA fold-every-commit inline track-step selection must match the
+        eager/GDN formula (issue #17): verify step i holds the state after
+        ``seq_pre + i + 1`` tokens, so the interval-crossing checkpoint is the
+        accepted node at position ``tracking_point - seq_pre - 1``, bounded by
+        the last accepted position. req0 (pre=63, 4 accepted) must gather
+        position 0 (node 0) and req1 (pre=62, 4 accepted) position 1 (node 5);
+        the buggy ``min(tp - pre, accept_lens - 1)`` gathered positions 1 and 2
+        (nodes 1 and 6). req2 crosses no interval and must stay -1.
+
+        The interval grid is patched like test_mamba_verify_update_with_track_
+        indices above; the call asserts the raw accepted-node positions, so an
+        interval mismatch cannot silently pass it.
+        """
+        from sglang.srt.speculative.spec_utils import commit_mamba_states_after_verify
+
+        target_worker = self._make_mock_target_worker()
+        mamba_pool = target_worker.model_runner.req_to_token_pool.mamba_pool
+        mamba_pool.replayssm_spec_fold = True
+        mamba_pool.replayssm_is_kda = True
+
+        batch = MagicMock()
+        batch.forward_mode.is_idle.return_value = False
+        batch.mamba_track_indices = torch.tensor([100, 200, 300], dtype=torch.int64)
+        batch.seq_lens = torch.tensor([63, 62, 200], dtype=torch.int32)
+        accept_lens = torch.tensor([4, 4, 1], dtype=torch.int32)
+        accept_index = torch.tensor(
+            [
+                [0, 1, 2, 3],
+                [4, 5, 6, 7],
+                [8, -1, -1, -1],
+            ],
+            dtype=torch.int32,
+        )
+
+        captured = {}
+
+        def _fake_commit(**kwargs):
+            captured.update(kwargs)
+
+        with (
+            patch(
+                "sglang.srt.speculative.spec_utils.mambaish_config",
+                return_value={"some": "config"},
+            ),
+            patch(
+                "sglang.srt.speculative.spec_utils.mamba_track_grid",
+                return_value=64,
+            ),
+            patch(
+                "sglang.kernels.ops.attention.fla."
+                "kda_replayssm_spec_decode.commit_kda_replayssm_after_verify",
+                side_effect=_fake_commit,
+            ),
+        ):
+            commit_mamba_states_after_verify(
+                target_worker,
+                batch,
+                accept_lens,
+                accept_index,
+                draft_token_num=4,
+            )
+
+        self.assertTrue(
+            torch.equal(
+                captured["last_correct_step_indices"],
+                torch.tensor([3, 3, 0], dtype=torch.int32),
+            )
+        )
+        self.assertTrue(
+            torch.equal(
+                captured["mamba_steps_to_track"],
+                torch.tensor([0, 1, -1], dtype=torch.int32),
+            )
+        )
+
 
 class TestConvWindowDedupLayout(CustomTestCase):
     """KDA stores conv_state as (K-1, channel), unlike GDN; partial-accept

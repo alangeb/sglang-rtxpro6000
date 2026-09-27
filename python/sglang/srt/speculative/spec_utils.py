@@ -879,9 +879,13 @@ def _verify_commit_step_indices(
         != seq_lens_post_verify // mamba_track_interval
     )
     tracking_point = seq_lens_post_verify // mamba_track_interval * mamba_track_interval
+    # Verify step i caches the state after seq_pre + i + 1 tokens, so the
+    # checkpoint for `tracking_point` is step tracking_point - seq_pre - 1.
+    # The accept_lens bound and clamp only keep the gathered accept_index
+    # positions in range (they do not move the boundary itself).
     to_track_ith = torch.clamp(
         torch.minimum(
-            tracking_point - seq_lens_pre_verify,
+            tracking_point - seq_lens_pre_verify - 1,
             accept_lens - 1,
         ),
         min=0,
@@ -1055,8 +1059,12 @@ def commit_mamba_states_after_verify(
             seq_post = batch.seq_lens + accept_lens
             to_track_mask = seq_pre // ti != seq_post // ti
             tracking_point = seq_post // ti * ti
+            # Step i caches the state after seq_pre + i + 1 tokens: the
+            # boundary checkpoint is step tracking_point - seq_pre - 1; the
+            # bound/clamp keep gather indices in range (see
+            # _verify_commit_step_indices).
             to_track_ith = torch.clamp(
-                torch.minimum(tracking_point - seq_pre, accept_lens - 1),
+                torch.minimum(tracking_point - seq_pre - 1, accept_lens - 1),
                 min=0,
             ).to(torch.int64)
             candidate = accept_index[req_idx, to_track_ith] - accept_indices_offset
