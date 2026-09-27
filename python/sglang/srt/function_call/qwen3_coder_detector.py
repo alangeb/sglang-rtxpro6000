@@ -58,6 +58,7 @@ class Qwen3CoderDetector(BaseFormatDetector):
 
         # Initialize attributes that were missing in the original PR
         self.current_func_name: Optional[str] = None
+        self._stream_string: Optional[dict] = None
 
         # Hold the wrapper until its name is validated. Rejected examples must
         # survive as literal text, including markup received in earlier chunks.
@@ -453,6 +454,72 @@ class Qwen3CoderDetector(BaseFormatDetector):
             return False
         return all(char in " \t\r" for char in line[marker_end:])
 
+    def _emit_string_parameter(self, calls: List[ToolCallItem]) -> bool:
+        """Emit a declared string while retaining possible closing markup."""
+        state = self._stream_string
+        value = self._buffer[self.parsed_pos :]
+        if state["leading"] and value:
+            state["leading"] = False
+            if value.startswith("\n"):
+                self._advance_stream(1)
+                value = value[1:]
+
+        delimiters = (
+            (self.parameter_end_token, len(self.parameter_end_token)),
+            (self.parameter_prefix, 0),
+            (self.function_end_token, 0),
+        )
+        endings = [
+            (value.find(token), consume)
+            for token, consume in delimiters
+            if token in value
+        ]
+        complete = bool(endings)
+        if complete:
+            end, consume = min(endings)
+            chunk = value[:end]
+            if chunk.endswith("\n"):
+                chunk = chunk[:-1]
+            advance = end + consume
+        else:
+            # A trailing LF may be stripped on completion; a possible "null"
+            # and any split delimiter must also remain undecided until then.
+            keep = max(len(token) for token, _ in delimiters) + len("null")
+            advance = max(0, len(value) - keep)
+            if not advance:
+                return False
+            chunk = value[:advance]
+
+        fragment = ""
+        if not state["opened"]:
+            if not self.json_started:
+                fragment += "{"
+                self.json_started = True
+            if self.current_tool_param_count:
+                fragment += ", "
+            fragment += json.dumps(state["name"]) + ": "
+            if complete and chunk.lower() == "null":
+                fragment += "null"
+            else:
+                fragment += '"' + json.dumps(chunk, ensure_ascii=False)[1:-1]
+                if complete:
+                    fragment += '"'
+            state["opened"] = True
+        else:
+            fragment += json.dumps(chunk, ensure_ascii=False)[1:-1]
+            if complete:
+                fragment += '"'
+
+        if fragment:
+            calls.append(
+                ToolCallItem(tool_index=self.current_tool_id, parameters=fragment)
+            )
+        self._advance_stream(advance)
+        if complete:
+            self.current_tool_param_count += 1
+            self._stream_string = None
+        return complete
+
     def parse_streaming_increment(
         self, new_text: str, tools: List[Tool]
     ) -> StreamingParseResult:
@@ -469,6 +536,11 @@ class Qwen3CoderDetector(BaseFormatDetector):
         normal_text_chunks = []
 
         while True:
+            if self._stream_string is not None:
+                if self._emit_string_parameter(calls):
+                    continue
+                break
+
             # Working text slice
             current_slice = self._buffer[self.parsed_pos :]
 
@@ -649,6 +721,22 @@ class Qwen3CoderDetector(BaseFormatDetector):
             ):
                 name_end = current_slice.find(">")
                 if name_end != -1:
+                    param_name = current_slice[
+                        len(self.parameter_prefix) : name_end
+                    ]
+                    param_config = self._get_arguments_config(
+                        self.current_func_name, tools
+                    )
+                    schema = param_config.get(param_name)
+                    if isinstance(schema, dict) and schema.get("type") == "string":
+                        self._stream_string = {
+                            "name": param_name,
+                            "opened": False,
+                            "leading": True,
+                        }
+                        self._advance_stream(name_end + 1)
+                        continue
+
                     value_start_idx = name_end + 1
                     rest_of_slice = current_slice[value_start_idx:]
 

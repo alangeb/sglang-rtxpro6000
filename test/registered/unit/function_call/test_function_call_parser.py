@@ -2534,10 +2534,148 @@ class TestQwen3CoderDetector(unittest.TestCase):
                     },
                 ),
             ),
+            Tool(
+                type="function",
+                function=Function(
+                    name="write_file",
+                    parameters={
+                        "type": "object",
+                        "properties": {
+                            "file_path": {"type": "string"},
+                            "content": {"type": "string"},
+                            "count": {"type": "integer"},
+                            "metadata": {"type": "object"},
+                        },
+                    },
+                ),
+            ),
         ]
         self.detector = Qwen3CoderDetector()
 
     # ==================== Basic Functionality Tests ====================
+
+    def test_streaming_string_parameter_emits_before_closing_tag(self):
+        detector = Qwen3CoderDetector()
+        prefix = (
+            "<tool_call><function=write_file>"
+            "<parameter=file_path>/tmp/demo</parameter>"
+            "<parameter=content>"
+        )
+        calls = detector.parse_streaming_increment(prefix, self.tools).calls
+        calls += detector.parse_streaming_increment("x" * 1000, self.tools).calls
+
+        fragments = "".join(call.parameters for call in calls)
+        self.assertIn('"content": "', fragments)
+        self.assertIn("x" * 100, fragments)
+        self.assertLess(len(detector._buffer), 128)
+
+        tail = (
+            "</parameter><parameter=count>42</parameter>"
+            '<parameter=metadata>{"a": [1, 2]}</parameter>'
+            "</function></tool_call>"
+        )
+        calls += detector.parse_streaming_increment(tail, self.tools).calls
+        self.assertEqual(
+            json.loads("".join(call.parameters for call in calls)),
+            {
+                "file_path": "/tmp/demo",
+                "content": "x" * 1000,
+                "count": 42,
+                "metadata": {"a": [1, 2]},
+            },
+        )
+
+    def test_streaming_string_parameter_matches_non_streaming(self):
+        values = [
+            "",
+            "null",
+            "NULL",
+            "nul",
+            "nullish",
+            "\n",
+            "\n\n",
+            "\n hello\n",
+            '中文🙂"\\\t\r\n' * 20,
+            "a < x and </param is not a delimiter",
+        ]
+        for value in values:
+            source = (
+                "<tool_call><function=write_file>"
+                "<parameter=file_path>/tmp/demo</parameter>"
+                f"<parameter=content>{value}</parameter>"
+                "<parameter=count>42</parameter>"
+                '<parameter=metadata>{"a": [1, 2]}</parameter>'
+                "</function></tool_call>"
+            )
+            expected = json.loads(
+                Qwen3CoderDetector()
+                .detect_and_parse(source, self.tools)
+                .calls[0]
+                .parameters
+            )
+            for width in (1, 2, 7, 41, len(source)):
+                with self.subTest(value=value, width=width):
+                    detector = Qwen3CoderDetector()
+                    fragments = []
+                    for offset in range(0, len(source), width):
+                        result = detector.parse_streaming_increment(
+                            source[offset : offset + width], self.tools
+                        )
+                        fragments.extend(call.parameters for call in result.calls)
+                    self.assertEqual(json.loads("".join(fragments)), expected)
+
+    def test_interrupted_stream_does_not_close_string_parameter(self):
+        detector = Qwen3CoderDetector()
+        fragments = []
+        for chunk in (
+            "<tool_call><function=write_file><parameter=content>",
+            "x" * 1000,
+            "y" * 1000,
+        ):
+            result = detector.parse_streaming_increment(chunk, self.tools)
+            fragments.extend(call.parameters for call in result.calls)
+            self.assertLess(len(detector._buffer), 128)
+
+        with self.assertRaises(json.JSONDecodeError):
+            json.loads("".join(fragments))
+
+    def test_streaming_string_parameter_legacy_endings(self):
+        for ending in (
+            "</parameter>",
+            "<parameter=count>42</parameter>",
+            "</function></tool_call>",
+        ):
+            source = (
+                "<tool_call><function=write_file>"
+                "<parameter=content>" + "x" * 100 + ending
+            )
+            if "</function>" not in ending:
+                source += "</function></tool_call>"
+            expected = json.loads(
+                Qwen3CoderDetector()
+                .detect_and_parse(source, self.tools)
+                .calls[0]
+                .parameters
+            )
+            for width in (1, 2, 13, len(source)):
+                with self.subTest(ending=ending, width=width):
+                    detector = Qwen3CoderDetector()
+                    fragments = []
+                    for offset in range(0, len(source), width):
+                        result = detector.parse_streaming_increment(
+                            source[offset : offset + width], self.tools
+                        )
+                        fragments.extend(call.parameters for call in result.calls)
+                    self.assertEqual(json.loads("".join(fragments)), expected)
+
+    def test_non_string_and_missing_schema_remain_buffered(self):
+        for parameter in ("count", "metadata", "unknown"):
+            detector = Qwen3CoderDetector()
+            prefix = f"<tool_call><function=write_file><parameter={parameter}>"
+            calls = detector.parse_streaming_increment(prefix, self.tools).calls
+            calls += detector.parse_streaming_increment("x" * 1000, self.tools).calls
+            self.assertEqual("".join(call.parameters for call in calls), "")
+            self.assertGreaterEqual(len(detector._buffer), 1000)
 
     def test_plain_text_only(self):
         """
