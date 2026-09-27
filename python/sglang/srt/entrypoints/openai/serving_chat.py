@@ -37,6 +37,7 @@ from fastapi.responses import ORJSONResponse, StreamingResponse
 from jsonschema import Draft202012Validator, SchemaError
 
 from sglang.srt.entrypoints.openai import chat_encoding, encoding_dsv4, encoding_dsv32
+from sglang.srt.entrypoints.openai.parallel_prompt_encode import parallel_prompt_encode
 from sglang.srt.entrypoints.openai.protocol import (
     ChatCompletionMessageContentTextPart,
     ChatCompletionMessageContentVideoPart,
@@ -1406,8 +1407,8 @@ class OpenAIServingChat(OpenAIServingBase):
                     return_dict=False,
                     **extra_template_kwargs,
                 )
-                prompt_ids = self.tokenizer_manager.tokenizer.encode(
-                    rendered_prompt, **encode_kwargs
+                prompt_ids = parallel_prompt_encode(
+                    self.tokenizer_manager.tokenizer, rendered_prompt, encode_kwargs
                 )
             except Exception:
                 # If the first attempt fails, try with flat function-only format.
@@ -1428,8 +1429,8 @@ class OpenAIServingChat(OpenAIServingBase):
                             **extra_template_kwargs,
                         )
                     )
-                    prompt_ids = self.tokenizer_manager.tokenizer.encode(
-                        rendered_prompt, **encode_kwargs
+                    prompt_ids = parallel_prompt_encode(
+                        self.tokenizer_manager.tokenizer, rendered_prompt, encode_kwargs
                     )
                 except _CHAT_TEMPLATE_CLIENT_ERRORS as template_error:
                     # Template errors (e.g., from raise_exception in Jinja templates)
