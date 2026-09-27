@@ -230,6 +230,81 @@ class ThinkingControlTestCase(CustomTestCase):
             chat_template_kwargs={"enable_thinking": True},
         )
         self.assertTrue(req.chat_template_kwargs["enable_thinking"])
+        # a lone toggle fills the other family's key rather than being ignored
+        self.assertIs(req.chat_template_kwargs["thinking"], True)
+
+    def test_single_thinking_key_is_mirrored(self):
+        """A lone toggle for one model family fills the other family's key,
+        before --default-chat-template-kwargs can re-enable thinking."""
+        for value in (True, False):
+            for key in ("thinking", "enable_thinking"):
+                with self.subTest(key=key, value=value):
+                    req = ResponsesRequest(
+                        model="x",
+                        input="hi",
+                        store=False,
+                        chat_template_kwargs={key: value},
+                    )
+                    self.assertEqual(
+                        req.chat_template_kwargs,
+                        {"thinking": value, "enable_thinking": value},
+                    )
+
+    def test_single_thinking_key_mirroring_does_not_mutate_caller_dict(self):
+        """A reused options dict must not come back pre-filled with the other
+        family's key, or flipping the toggle yields a conflicting request."""
+        for value in (True, False):
+            for key in ("thinking", "enable_thinking"):
+                with self.subTest(key=key, value=value):
+                    options = {key: value}
+                    req = ResponsesRequest(
+                        model="x",
+                        input="hi",
+                        store=False,
+                        chat_template_kwargs=options,
+                    )
+                    self.assertEqual(
+                        req.chat_template_kwargs,
+                        {"thinking": value, "enable_thinking": value},
+                    )
+                    self.assertEqual(
+                        options,
+                        {key: value},
+                        "normalizer wrote through to the caller's dict",
+                    )
+
+                    options[key] = not value
+                    second = ResponsesRequest(
+                        model="x",
+                        input="hi",
+                        store=False,
+                        chat_template_kwargs=options,
+                    )
+                    self.assertEqual(
+                        second.chat_template_kwargs,
+                        {"thinking": not value, "enable_thinking": not value},
+                    )
+                    self.assertEqual(options, {key: not value})
+
+    def test_single_thinking_key_mirroring_leaves_conflicts_and_nonbooleans(self):
+        req = ResponsesRequest(
+            model="x",
+            input="hi",
+            store=False,
+            chat_template_kwargs={"thinking": False, "enable_thinking": True},
+        )
+        self.assertEqual(
+            req.chat_template_kwargs, {"thinking": False, "enable_thinking": True}
+        )
+        req = ResponsesRequest(
+            model="x",
+            input="hi",
+            store=False,
+            chat_template_kwargs={"thinking": "auto", "other": 1},
+        )
+        self.assertEqual(req.chat_template_kwargs, {"thinking": "auto", "other": 1})
+        req = ResponsesRequest(model="x", input="hi", store=False)
+        self.assertIsNone(req.chat_template_kwargs)
 
 
 class ResponsesResponseFromRequestTestCase(CustomTestCase):

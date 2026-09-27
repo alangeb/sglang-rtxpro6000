@@ -287,6 +287,118 @@ class TestChatCompletionRequest(unittest.TestCase):
         self.assertFalse(request.chat_template_kwargs.get("thinking"))
         self.assertFalse(request.chat_template_kwargs.get("enable_thinking"))
 
+    def test_chat_template_kwargs_thinking_mirrors_enable_thinking(self):
+        """A client that only knows the deepseek/kimi key (e.g. sgl-eval's
+        --no-thinking) must still toggle the qwen3/glm templates."""
+        messages = [{"role": "user", "content": "Hello"}]
+        for value in (True, False):
+            request = ChatCompletionRequest(
+                model="test-model",
+                messages=messages,
+                chat_template_kwargs={"thinking": value},
+            )
+            self.assertEqual(
+                request.chat_template_kwargs,
+                {"thinking": value, "enable_thinking": value},
+            )
+            request = ChatCompletionRequest(
+                model="test-model",
+                messages=messages,
+                chat_template_kwargs={"enable_thinking": value},
+            )
+            self.assertEqual(
+                request.chat_template_kwargs,
+                {"thinking": value, "enable_thinking": value},
+            )
+
+    def test_chat_template_kwargs_thinking_keys_not_overwritten(self):
+        """Both keys present, or a non-boolean value: leave the request alone."""
+        messages = [{"role": "user", "content": "Hello"}]
+        request = ChatCompletionRequest(
+            model="test-model",
+            messages=messages,
+            chat_template_kwargs={"thinking": True, "enable_thinking": False},
+        )
+        self.assertEqual(
+            request.chat_template_kwargs,
+            {"thinking": True, "enable_thinking": False},
+        )
+        request = ChatCompletionRequest(
+            model="test-model",
+            messages=messages,
+            chat_template_kwargs={"thinking": "auto", "other": 1},
+        )
+        self.assertEqual(request.chat_template_kwargs, {"thinking": "auto", "other": 1})
+        request = ChatCompletionRequest(
+            model="test-model",
+            messages=messages,
+            chat_template_kwargs={"enable_thinking": 1},
+        )
+        self.assertEqual(request.chat_template_kwargs, {"enable_thinking": 1})
+        request = ChatCompletionRequest(model="test-model", messages=messages)
+        self.assertIsNone(request.chat_template_kwargs)
+
+    def test_chat_template_kwargs_thinking_mirrors_after_top_level_controls(self):
+        """Explicit reasoning controls keep their precedence; the mirror only
+        fills a key nobody spoke about."""
+        messages = [{"role": "user", "content": "Hello"}]
+        request = ChatCompletionRequest(
+            model="test-model",
+            messages=messages,
+            reasoning_effort="none",
+            chat_template_kwargs={"thinking": True},
+        )
+        self.assertEqual(
+            request.chat_template_kwargs,
+            {"thinking": True, "enable_thinking": False},
+        )
+        request = ChatCompletionRequest(
+            model="test-model",
+            messages=messages,
+            reasoning_effort="high",
+            chat_template_kwargs={"thinking": False},
+        )
+        self.assertEqual(
+            request.chat_template_kwargs,
+            {"thinking": False, "enable_thinking": True},
+        )
+
+    def test_chat_template_kwargs_mirroring_leaves_caller_dict_untouched(self):
+        """The incoming kwargs dict is caller-owned (sgl-eval reuses one per
+        benchmark): mirror into a copy so a flipped value cannot leave a
+        stale, conflicting counterpart behind on the next request."""
+        messages = [{"role": "user", "content": "Hello"}]
+        for value in (True, False):
+            for key in ("thinking", "enable_thinking"):
+                with self.subTest(key=key, value=value):
+                    options = {key: value}
+                    request = ChatCompletionRequest(
+                        model="test-model",
+                        messages=messages,
+                        chat_template_kwargs=options,
+                    )
+                    self.assertEqual(
+                        request.chat_template_kwargs,
+                        {"thinking": value, "enable_thinking": value},
+                    )
+                    self.assertEqual(
+                        options,
+                        {key: value},
+                        "normalizer wrote through to the caller's dict",
+                    )
+
+                    options[key] = not value
+                    second = ChatCompletionRequest(
+                        model="test-model",
+                        messages=messages,
+                        chat_template_kwargs=options,
+                    )
+                    self.assertEqual(
+                        second.chat_template_kwargs,
+                        {"thinking": not value, "enable_thinking": not value},
+                    )
+                    self.assertEqual(options, {key: not value})
+
     def test_chat_completion_reasoning_effort_none_from_reasoning_dict(self):
         """Test reasoning_effort='none' via nested reasoning dict"""
         messages = [{"role": "user", "content": "Hello"}]

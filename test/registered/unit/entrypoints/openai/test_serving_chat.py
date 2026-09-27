@@ -597,6 +597,31 @@ class ServingChatTestCase(unittest.TestCase):
         kwargs = self.tm.tokenizer.apply_chat_template.call_args.kwargs
         self.assertIs(kwargs["enable_thinking"], True)
 
+    def test_default_chat_template_kwargs_do_not_override_lone_thinking_alias(self):
+        """A client that only names one toggle key (per family) keeps its
+        intended mode when the launcher defaults thinking on."""
+        self.template_manager.chat_template_name = None
+        self.template_manager.jinja_template_content_format = "string"
+        self.tm.tokenizer.apply_chat_template.return_value = [1, 2, 3]
+        self.chat.default_chat_template_kwargs = {"enable_thinking": True}
+
+        for key in ("thinking", "enable_thinking"):
+            with self.subTest(key=key):
+                req = ChatCompletionRequest(
+                    model="x",
+                    messages=[{"role": "user", "content": "What is 2+2?"}],
+                    chat_template_kwargs={key: False},
+                )
+
+                self.chat._process_messages(req, is_multimodal=False)
+
+                kwargs = self.tm.tokenizer.apply_chat_template.call_args.kwargs
+                self.assertIs(kwargs["enable_thinking"], False)
+                self.assertIs(kwargs["thinking"], False)
+                self.assertEqual(
+                    self.chat.default_chat_template_kwargs, {"enable_thinking": True}
+                )
+
     def test_default_chat_template_kwargs_mirrors_reasoning_effort(self):
         self.template_manager.chat_template_name = None
         self.template_manager.jinja_template_content_format = "string"
