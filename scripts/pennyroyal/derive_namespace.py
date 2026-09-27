@@ -178,7 +178,44 @@ def namespace_name(slug: str, identity: dict[str, Any]) -> tuple[str, str]:
     return f"{readable}_{digest[:12]}", digest
 
 
+def _warn_if_cache_filesystem_full(root: Path) -> None:
+    """Best-effort early warning before any cache-path creation is attempted.
+
+    A full or inode-exhausted filesystem makes the fresh namespace ``mkdir`` /
+    manifest write below fail with a bare OSError; say what is wrong first,
+    with user-owned retired-cache guidance. Read-only: never fatal, never a
+    directory scan, never touches existing data (the actual create errors
+    still surface unchanged).
+    """
+    try:
+        probe = root
+        while not probe.exists():
+            parent = probe.parent
+            if parent == probe:
+                break
+            probe = parent
+        stat = os.statvfs(str(probe))
+        frsize = stat.f_frsize or stat.f_bsize
+        total = stat.f_blocks * frsize
+        if (total > 0 and stat.f_bavail * frsize == 0) or (
+            stat.f_files > 0 and stat.f_favail == 0
+        ):
+            print(
+                f"derive_namespace: warning: the filesystem holding cache path "
+                f"{root} is full (no blocks or inodes free; probed {probe}); "
+                "creating the new cache namespace may fail. Retired-cache "
+                "cleanup is owned by the user: free space by removing only "
+                "old cache namespaces known to be unused; leave active cache "
+                "paths untouched.",
+                file=sys.stderr,
+            )
+    except OSError:
+        # Warning inspection is best-effort; creation errors still surface.
+        pass
+
+
 def ensure_manifest(root: Path, identity: dict[str, Any], digest: str) -> None:
+    _warn_if_cache_filesystem_full(root)
     root.mkdir(parents=True, exist_ok=True)
     manifest_path = root / MANIFEST_NAME
     manifest = {"identity_sha256": digest, "identity": identity}

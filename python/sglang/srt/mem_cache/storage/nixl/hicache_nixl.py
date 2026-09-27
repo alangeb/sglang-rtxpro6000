@@ -23,6 +23,7 @@ from sglang.srt.mem_cache.storage.mmap import alloc_mmap
 from sglang.srt.mem_cache.storage.nixl.nixl_cleaner import (
     GIBIBYTE,
     HiCacheL3Cleaner,
+    warn_on_cache_filesystem_pressure,
 )
 
 from .nixl_registry import NixlRegistry
@@ -97,6 +98,21 @@ class HiCacheNixl(HiCacheStorage):
         storage_dirs = _parse_storage_dirs(
             envs.SGLANG_HICACHE_NIXL_BACKEND_STORAGE_DIR.get() or file_path
         )
+        # Startup-only, read-only filesystem pressure warning, logged before
+        # the file manager (re-)creates base/bucket directories so a full or
+        # inode-exhausted fresh namespace explains itself before any mkdir can
+        # fail. Independent of whether the automatic cleaner is enabled (users
+        # own retired-cache cleanup and may disable it) and never fatal.
+        # Rank 0 only, mirroring HiCacheL3Cleaner.start, to avoid
+        # duplicated-rank spam; the helper logs at most once per filesystem.
+        if (
+            storage_config.tp_rank == 0
+            and plugin not in NixlBackendSelection.OBJ_PLUGINS
+        ):
+            warn_on_cache_filesystem_pressure(
+                storage_dirs,
+                nixlconfig.get_l3_cleaner_config()["high_watermark"],
+            )
         self.file_manager = (
             NixlFileManager(storage_dirs, use_direct_io=use_direct_io)
             if plugin not in NixlBackendSelection.OBJ_PLUGINS

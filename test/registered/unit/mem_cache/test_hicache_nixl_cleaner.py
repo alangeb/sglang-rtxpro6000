@@ -7,7 +7,9 @@ register_cpu_ci(est_time=5, suite="base-a-test-cpu")
 import os
 import shutil
 import tempfile
+import types
 import unittest
+from unittest import mock
 
 from sglang.srt.environ import envs
 from sglang.srt.mem_cache.storage.nixl.nixl_cleaner import (
@@ -16,6 +18,7 @@ from sglang.srt.mem_cache.storage.nixl.nixl_cleaner import (
     _allocated_bytes,
     _parse_group_key,
     _safe_unlink,
+    warn_on_cache_filesystem_pressure,
 )
 from sglang.srt.mem_cache.storage.nixl.nixl_utils import (
     NixlBackendConfig,
@@ -796,6 +799,212 @@ class TestHiCacheL3CleanerQuotaConfig(CustomTestCase):
             'max_cache_bytes=cleaner_config["max_cache_gb"] * GIBIBYTE', source
         )
         self.assertEqual(GIBIBYTE, 1024**3)
+
+
+class TestCacheFilesystemPressureWarning(CustomTestCase):
+    """Startup-only, read-only warning when a cache filesystem is full/near-full."""
+
+    def setUp(self):
+        self.test_dir = tempfile.mkdtemp(prefix="test_nixl_fs_pressure_")
+        self.base_dirs = [os.path.join(self.test_dir, f"disk{i}") for i in range(2)]
+        for base in self.base_dirs:
+            os.makedirs(base, exist_ok=True)
+
+    def tearDown(self):
+        shutil.rmtree(self.test_dir, ignore_errors=True)
+
+    @staticmethod
+    def _vfs(blocks, avail_blocks, files=1000, favail=1000, frsize=4096):
+        return types.SimpleNamespace(
+            f_bsize=frsize,
+            f_frsize=frsize,
+            f_blocks=blocks,
+            f_bfree=avail_blocks,
+            f_bavail=avail_blocks,
+            f_files=files,
+            f_ffree=favail,
+            f_favail=favail,
+        )
+
+    def _warn_logs(self, vfs, dirs=None, high_watermark=80.0):
+        with mock.patch.object(os, "statvfs", return_value=vfs), self.assertLogs(
+            "sglang.srt.mem_cache.storage.nixl.nixl_cleaner", level="WARNING"
+        ) as logs:
+            warn_on_cache_filesystem_pressure(
+                self.base_dirs if dirs is None else dirs,
+                high_watermark,
+            )
+        return "\n".join(logs.output)
+
+    def _no_warn(self, vfs, dirs=None, high_watermark=80.0):
+        with mock.patch.object(os, "statvfs", return_value=vfs), self.assertNoLogs(
+            "sglang.srt.mem_cache.storage.nixl.nixl_cleaner", level="WARNING"
+        ):
+            warn_on_cache_filesystem_pressure(
+                self.base_dirs if dirs is None else dirs,
+                high_watermark,
+            )
+
+    def test_pressure_warns_once_with_path_and_space(self):
+        # 85% used: one warning for both dirs because they share a filesystem.
+        message = self._warn_logs(self._vfs(1000, 150))
+        self.assertIn(self.base_dirs[0], message)
+        self.assertIn("85.0% used", message)
+        self.assertIn("GiB free", message)
+        self.assertIn("old cache namespaces you know are no longer used", message)
+        self.assertIn("leave this active cache path and its contents untouched", message)
+        self.assertNotIn(self.base_dirs[1], message, "one line per filesystem")
+
+    def test_adequate_space_stays_quiet(self):
+        self._no_warn(self._vfs(1000, 500))
+
+    def test_full_is_explicit(self):
+        message = self._warn_logs(self._vfs(1000, 0))
+        self.assertIn("FULL", message)
+        self.assertIn("0.00 GiB free", message)
+
+    def test_missing_target_probes_nearest_existing_parent(self):
+        # A fresh namespace that NixlFileManager has not created yet must
+        # still get a pre-creation warning, reporting the configured path.
+        missing = os.path.join(self.test_dir, "fresh_namespace")
+        probed: list[str] = []
+
+        def fake_statvfs(target):
+            probed.append(target)
+            return self._vfs(1000, 0)
+
+        with mock.patch.object(os, "statvfs", side_effect=fake_statvfs), self.assertLogs(
+            "sglang.srt.mem_cache.storage.nixl.nixl_cleaner", level="WARNING"
+        ) as logs:
+            warn_on_cache_filesystem_pressure([missing], 80.0)
+        message = "\n".join(logs.output)
+        self.assertIn(missing, message)
+        self.assertIn("FULL", message)
+        self.assertEqual(probed, [self.test_dir], "probe walks up to existing parent")
+
+    def test_inode_exhaustion_warns_even_with_free_bytes(self):
+        message = self._warn_logs(self._vfs(1000, 500, files=1000, favail=0))
+        self.assertIn("FULL", message)
+        self.assertIn("0 of 1000 inodes free", message)
+
+    def test_configured_high_watermark_is_honored(self):
+        # 85% used stays quiet under a configured 90% threshold...
+        self._no_warn(self._vfs(1000, 150), high_watermark=90.0)
+        # ...and warns at the default 80%.
+        self.assertIn("85.0% used", self._warn_logs(self._vfs(1000, 150)))
+
+    def test_missing_relative_target_still_warns(self):
+        # _parse_storage_dirs preserves relative paths; the probe must be
+        # absolutized before the parent walk, the message keeps the raw path.
+        relative = os.path.join("fresh_namespace", "cache")
+        probed: list[str] = []
+
+        def fake_statvfs(target):
+            probed.append(target)
+            return self._vfs(1000, 0)
+
+        with mock.patch.object(
+            os, "getcwd", return_value=self.test_dir
+        ), mock.patch.object(
+            os, "statvfs", side_effect=fake_statvfs
+        ), self.assertLogs(
+            "sglang.srt.mem_cache.storage.nixl.nixl_cleaner", level="WARNING"
+        ) as logs:
+            warn_on_cache_filesystem_pressure([relative], 80.0)
+        message = "\n".join(logs.output)
+        self.assertIn(relative, message)
+        self.assertIn("FULL", message)
+        self.assertEqual(probed, [self.test_dir])
+
+    def test_probe_failure_never_raises_and_stays_quiet(self):
+        with mock.patch.object(
+            os, "statvfs", side_effect=OSError("no proxy for you")
+        ), self.assertNoLogs(
+            "sglang.srt.mem_cache.storage.nixl.nixl_cleaner", level="WARNING"
+        ):
+            warn_on_cache_filesystem_pressure(self.base_dirs, 80.0)
+
+    def test_non_file_storage_has_no_dirs_and_stays_quiet(self):
+        # OBJ-only deployments resolve file_manager=None -> no cleanup dirs.
+        self._no_warn(self._vfs(1000, 0), dirs=[])
+
+    def test_disabled_cleaner_does_not_silence_the_warning(self):
+        cfg = NixlBackendConfig({"l3_cleaner_enabled": False}).get_l3_cleaner_config()
+        self.assertFalse(cfg["enabled"])
+        message = self._warn_logs(
+            self._vfs(1000, 150), high_watermark=cfg["high_watermark"]
+        )
+        self.assertIn("85.0% used", message)
+
+    def test_rank_zero_only_call_site_in_backend(self):
+        """HiCacheNixl warns on TP rank 0 so ranks cannot spam duplicates."""
+        import ast
+        import importlib.util
+
+        spec = importlib.util.find_spec(
+            "sglang.srt.mem_cache.storage.nixl.hicache_nixl"
+        )
+        with open(spec.origin, encoding="utf-8") as handle:
+            tree = ast.parse(handle.read())
+        cls = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.ClassDef) and node.name == "HiCacheNixl"
+        )
+        init = next(
+            node
+            for node in cls.body
+            if isinstance(node, ast.FunctionDef) and node.name == "__init__"
+        )
+
+        def _warn_calls(node):
+            return [
+                call
+                for call in ast.walk(node)
+                if isinstance(call, ast.Call)
+                and getattr(call.func, "id", "") == "warn_on_cache_filesystem_pressure"
+            ]
+
+        def _is_rank_zero_guard(node):
+            for test in ast.walk(node.test):
+                if not isinstance(test, ast.Compare):
+                    continue
+                left = test.left
+                if (
+                    isinstance(left, ast.Name) and left.id == "tp_rank"
+                ) or (
+                    isinstance(left, ast.Attribute) and left.attr == "tp_rank"
+                ):
+                    if (
+                        len(test.ops) == 1
+                        and isinstance(test.ops[0], ast.Eq)
+                        and isinstance(test.comparators[0], ast.Constant)
+                        and test.comparators[0].value == 0
+                    ):
+                        return True
+            return False
+
+        guarded = [
+            node
+            for node in ast.walk(init)
+            if isinstance(node, ast.If) and _is_rank_zero_guard(node)
+        ]
+        total = _warn_calls(init)
+        self.assertEqual(len(total), 1, "exactly one startup warning call site")
+        self.assertEqual(sum(len(_warn_calls(node)) for node in guarded), len(total))
+        manager_lines = [
+            call.lineno
+            for call in ast.walk(init)
+            if isinstance(call, ast.Call)
+            and getattr(call.func, "id", "") == "NixlFileManager"
+        ]
+        self.assertTrue(manager_lines)
+        self.assertLess(
+            total[0].lineno,
+            min(manager_lines),
+            "warning precedes directory creation so a full filesystem still "
+            "explains itself before mkdir can fail",
+        )
 
 
 def _scan_allocated(base_dirs) -> int:

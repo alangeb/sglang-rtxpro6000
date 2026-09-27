@@ -113,6 +113,90 @@ def _safe_unlink(path: str, estimated_bytes: int = 0) -> tuple[bool, int]:
         return False, 0
 
 
+def warn_on_cache_filesystem_pressure(
+    storage_dirs: list[str] | str,
+    high_watermark: float,
+) -> None:
+    """Log a startup warning when a configured NIXL FILE cache filesystem is
+    full or at/above the configured high watermark.
+
+    Retired-cache cleanup is owned by the user; this is a read-only inspection
+    that never scans, deletes, or touches cache contents, and it runs even
+    when the automatic HiCacheL3Cleaner is disabled. It uses one statvfs per
+    configured directory -- probing the nearest existing parent when a fresh
+    namespace has not been created yet -- logs at most once per distinct
+    filesystem, and swallows inspection failures so warning checks can never
+    crash serving.
+    """
+    if isinstance(storage_dirs, str):
+        storage_dirs = [storage_dirs]
+    seen_devices: set[int] = set()
+    for path in storage_dirs:
+        if not path:
+            continue
+        try:
+            # Only the probe is absolutized (relative user paths would walk
+            # to '' and statvfs('') fails); the message keeps the configured
+            # path verbatim.
+            probe = os.path.abspath(path)
+            while not os.path.exists(probe):
+                parent = os.path.dirname(probe)
+                if parent == probe:
+                    break
+                probe = parent
+            stat = os.statvfs(probe)
+            device = os.stat(probe).st_dev
+            if device in seen_devices:
+                continue
+            seen_devices.add(device)
+            frsize = stat.f_frsize or stat.f_bsize
+            total = stat.f_blocks * frsize
+            available = stat.f_bavail * frsize
+            used_pct = 100.0 * (total - available) / total if total > 0 else 0.0
+            inode_total = stat.f_files
+            free_inodes = stat.f_favail
+            inode_used_pct = (
+                100.0 * (inode_total - free_inodes) / inode_total
+                if inode_total > 0
+                else 0.0
+            )
+            exhausted = (total > 0 and available == 0) or (
+                inode_total > 0 and free_inodes == 0
+            )
+            at_threshold = (
+                used_pct >= high_watermark or inode_used_pct >= high_watermark
+            )
+            if not (exhausted or at_threshold):
+                continue
+            state = (
+                "FULL"
+                if exhausted
+                else f"at or above the configured {high_watermark:.1f}% pressure threshold"
+            )
+            inode_note = (
+                f", {free_inodes} of {inode_total} inodes free" if inode_total > 0 else ""
+            )
+            logger.warning(
+                "HiCacheNixl: the filesystem holding cache path %s is %s "
+                "(%.1f%% used, %.2f GiB free%s). Retired-cache cleanup is "
+                "owned by the user: free space if needed by removing only "
+                "old cache namespaces you know are no longer used, and leave "
+                "this active cache path and its contents untouched.",
+                path,
+                state,
+                used_pct,
+                available / GIBIBYTE,
+                inode_note,
+            )
+        except Exception:
+            # Warning inspection is best-effort; never fail serving over it.
+            logger.debug(
+                "Could not check cache filesystem pressure for %s",
+                path,
+                exc_info=True,
+            )
+
+
 class HiCacheL3Cleaner:
     """Delete old NIXL FILE cache entries when disk usage exceeds watermarks.
 
