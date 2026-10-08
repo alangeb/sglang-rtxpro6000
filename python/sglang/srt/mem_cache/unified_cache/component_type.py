@@ -76,23 +76,29 @@ _mamba_spill_low_water_cache: Optional[int] = None
 
 
 def mamba_spill_low_water() -> int:
-    """High-water trigger for the PROACTIVE mamba spill (P3-1 follow-up).
+    """High-water trigger for the PROACTIVE mamba spill (D1).
 
     When the device mamba allocator drops below this many free slots, the
-    oldest safe checkpoint is D->H copied and its VRAM slot freed, instead of
-    waiting for an allocation to fail (which never happens: tree.evict() can
-    always free one slot by destroying the oldest checkpoint).
-    0 disables the proactive trigger. Only consulted when the anchor flag is
-    on, so the default path is untouched.
+    oldest safe device-only checkpoint is D->H copied so its VRAM slot can be
+    reclaimed by normal eviction, instead of waiting for an allocation to fail
+    (which never happens: tree.evict() can always free one slot by destroying
+    the oldest checkpoint -- but destroys it *without* a host copy).
+
+    0 disables the proactive trigger, and 0 is the DEFAULT (was 4 while the
+    function had no call sites). It is now wired into the mamba alloc choke
+    point, so a non-zero default would silently change behaviour for every
+    host-anchor run that never opted in. With the env unset, behaviour is
+    identical to the pre-D1 tree; the spill additionally requires
+    SGLANG_MAMBA_HOST_ANCHOR=1 and an enabled hierarchical cache.
     """
     global _mamba_spill_low_water_cache
     if _mamba_spill_low_water_cache is None:
         try:
             _mamba_spill_low_water_cache = max(
-                0, int(os.environ.get("SGLANG_MAMBA_SPILL_LOW_WATER", "4"))
+                0, int(os.environ.get("SGLANG_MAMBA_SPILL_LOW_WATER", "0"))
             )
         except ValueError:
-            _mamba_spill_low_water_cache = 4
+            _mamba_spill_low_water_cache = 0
     return _mamba_spill_low_water_cache
 
 
