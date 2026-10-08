@@ -37,6 +37,11 @@ from sglang.srt.mem_cache.unified_cache.components.tree_component import (
     TreeComponent,
     get_and_increase_time_counter,
 )
+from sglang.srt.mem_cache.unified_cache.component_type import (
+    mamba_host_anchor_enabled,
+    mamba_host_debug_enabled,
+    mamba_spill_low_water,
+)
 from sglang.srt.runtime_context import (
     get_exec,
     mamba_cache_chunk_size,
@@ -504,9 +509,55 @@ class MambaComponent(TreeComponent):
         """Allocate one slot after eviction, or return None if none is evictable."""
         slot = self.cache.req_to_token_pool.mamba_allocator.alloc(1)
         if slot is None:
+            self._maybe_spill_low_water()
             self.cache.evict_for_alloc(EvictParams(num_tokens=0, mamba_num=1))
             slot = self.cache.req_to_token_pool.mamba_allocator.alloc(1)
         return slot
+
+    def _maybe_spill_low_water(self) -> None:
+        """Proactive device->host spill (D1) at the alloc choke point.
+
+        Runs AFTER the failed alloc(1) and BEFORE evict_for_alloc, so the
+        oldest checkpoints reach the host tier instead of being destroyed by
+        eviction. Deliberately never calls evict_for_alloc itself: the spill
+        keeps its victims device-resident until their write ack, and the
+        eviction walk asserts single-flight (tree_component.evict_device_start).
+        """
+        low = mamba_spill_low_water()
+        if (
+            low <= 0
+            or not mamba_host_anchor_enabled()
+            or not self.tree_core.enable_hicache
+        ):
+            return
+        if (
+            self.cache._component_available_size(ComponentType.MAMBA) >= low
+            or self.cache.buffer_pipeline is not None
+        ):
+            return
+        self._spill_oldest_to_host(8)
+
+    def _spill_oldest_to_host(self, max_victims: int) -> int:
+        """D->H copy the oldest safe device-only checkpoints (D1).
+
+        Selection lives in the tree core; each victim's device slot stays live
+        until ``UnifiedRadixCache._finish_write_through_ack`` frees it, because
+        the copy is asynchronous. Returns the number of spills issued.
+        """
+        victims = self.tree_core.mamba_spill_oldest(max_victims)
+        spilled = 0
+        for node_id in victims:
+            if self.cache._execute_mamba_backup(node_id):
+                spilled += 1
+        if spilled and mamba_host_debug_enabled():
+            logger.info(
+                "[MAMBA-HOST] spill: issued %d/%d node_ids=%s available=%d",
+                spilled,
+                len(victims),
+                victims,
+                self.cache.req_to_token_pool.mamba_allocator.available_size(),
+            )
+        return spilled
 
     _last_skip_log_time = 0.0
 
