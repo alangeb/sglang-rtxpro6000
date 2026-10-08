@@ -1382,6 +1382,11 @@ class UnifiedRadixCache(BasePrefixCache):
         than from the KV anchor. The victim's device slot stays live until the
         write ack frees it -- freeing it alongside the async copy would let the
         copy read a recycled slot.
+
+        The node is locked for the copy's duration (mirroring the write-through
+        backup path): the device-eviction walk only skips locked nodes, so the
+        pending mark alone would not pin the DMA source, and the sanity check
+        requires ongoing write-through nodes to hold a Full lock.
         """
         spec = self.tree_core.build_mamba_backup_spec(node_id)
         if spec is None:
@@ -1408,14 +1413,12 @@ class UnifiedRadixCache(BasePrefixCache):
         ) is None:
             self.host_pool_group.free(host_indices, pool=PoolName.MAMBA)
             return False
+        lock_params = self.inc_lock_ref(node_id).to_dec_params()
         self.tree_core.commit_backup(node_id, torch.empty(0, dtype=torch.int64), comp_xfers)
         self.tree_core.mark_write_through_pending(node_id)
-        # No lock: the spill's device slot is pinned by the pending mark alone
-        # (the ack frees it), and locking would flip the node's evictable
-        # accounting for the copy's duration without any request needing it.
         ack_id = node_id
         self.ongoing_write_through[ack_id] = _OngoingWriteThrough(
-            node_id, None, [node_id]
+            node_id, lock_params, [node_id]
         )
         self.ongoing_mamba_spill[ack_id] = node_id
         if self.metrics_collector is not None:
