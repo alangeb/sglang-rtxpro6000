@@ -34,7 +34,8 @@ COMPS = (ComponentType.FULL, ComponentType.MAMBA)
 MAMBA = ComponentType.MAMBA
 
 
-def _node(parent, token: int, *, device: bool = True, host: bool = False):
+def _node(parent, token: int, *, device: bool = True, host: bool = False,
+          full_host: bool = True):
     node = UnifiedTreeNode(COMPS)
     node.parent = parent
     node.key = RadixKey(array("q", range(token, token + 1)))
@@ -44,6 +45,11 @@ def _node(parent, token: int, *, device: bool = True, host: bool = False):
     cd.value = torch.tensor([token], dtype=torch.int64) if device else None
     cd.host_value = torch.tensor([1000 + token], dtype=torch.int64) if host else None
     node.component_data[ComponentType.FULL].value = [token]
+    # A spill victim must already hold a FULL host copy (tree invariant: aux
+    # host data requires Full host data in write_through mode).
+    node.component_data[ComponentType.FULL].host_value = (
+        torch.tensor([2000 + token], dtype=torch.int64) if full_host else None
+    )
     return node
 
 
@@ -128,6 +134,19 @@ class TestMambaSpillSelection(unittest.TestCase):
         a = core.add(core.root_node, 1)
         core.lru_lists[MAMBA].remove_node(a)
         self.assertEqual(core.mamba_spill_oldest(8), [])
+
+    def test_node_without_full_host_copy_is_skipped(self):
+        """The tree invariant (sanity_check PART 2) requires aux host data to be
+        backed by Full host data in write_through mode, so a device-only KV node
+        must never be a spill victim: spilling it would crash the scheduler."""
+        core = _FakeCore()
+        no_full_host = core.add(core.root_node, 1, full_host=False)
+        with_full_host = core.add(no_full_host, 2, full_host=True)
+        self.assertEqual(core.mamba_spill_oldest(8), [with_full_host.id])
+        no_full_host.component_data[ComponentType.FULL].host_value = (
+            torch.tensor([2001], dtype=torch.int64)
+        )
+        self.assertEqual(core.mamba_spill_oldest(8), [no_full_host.id, with_full_host.id])
 
     def test_spec_is_empty_for_a_host_backed_node(self):
         core = _FakeCore()
@@ -222,6 +241,18 @@ class TestMambaSpillBackup(unittest.TestCase):
         cache.evict_host = lambda n, ct: n
         cache.enable_storage = False
         cache._free_values = lambda d, h: None
+        cache._lock_log = []
+
+        def _inc_lock(nid, skip_lock_components=()):
+            cache._lock_log.append(("inc", nid))
+            return SimpleNamespace(to_dec_params=lambda nid=nid: ("dec", nid))
+
+        cache.inc_lock_ref = _inc_lock
+
+        def _dec_lock(nid, params=None, skip_swa=False):
+            cache._lock_log.append(("dec", nid))
+
+        cache.dec_lock_ref = _dec_lock
         core.commit_backup = lambda nid, hv, xfers: node.component_data[
             MAMBA
         ].__setattr__("host_value", hv if hv.numel() else torch.tensor([7]))
@@ -249,11 +280,18 @@ class TestMambaSpillBackup(unittest.TestCase):
         self.assertIsNotNone(node.component_data[MAMBA].host_value)
         self.assertIsNotNone(node.component_data[MAMBA].value)  # freed at ack only
         self.assertEqual(cache.ongoing_mamba_spill[node.id], node.id)
+        # The DMA source must be locked for the copy's duration (the device
+        # eviction walk only skips locked nodes; the sanity check requires
+        # ongoing write-through nodes to hold a Full lock).
+        self.assertEqual(cache._lock_log, [("inc", node.id)])
+        _, lock_params, _ = cache.ongoing_write_through[node.id]
+        self.assertIsNotNone(lock_params)
 
         cache._finish_write_through_ack(node.id)
         self.assertIsNone(node.component_data[MAMBA].value)
         self.assertEqual(cache.ongoing_mamba_spill, {})
         self.assertIsNone(node.write_through_pending_id)
+        self.assertEqual(cache._lock_log, [("inc", node.id), ("dec", node.id)])
 
     def test_same_node_is_never_spilled_twice(self):
         core = _FakeCore()
