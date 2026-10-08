@@ -2185,6 +2185,21 @@ class RadixCacheMetricsCollector(_StatLoggerDIMixin):
             labelnames=list(labels.keys()) + ["reason", "pool"],
         )
 
+        self.mamba_spill_events = Counter(
+            name="sglang:mamba_spill_events_total",
+            documentation="The number of proactive device-to-host Mamba state "
+            "spills issued (one per checkpoint copied, not per slot). Only "
+            "moves while SGLANG_MAMBA_SPILL_LOW_WATER is non-zero.",
+            labelnames=labels.keys(),
+        )
+
+        self.mamba_spill_slots = Counter(
+            name="sglang:mamba_spill_slots_total",
+            documentation="The number of Mamba state slots whose device copy "
+            "was reclaimed after a proactive spill landed on host.",
+            labelnames=labels.keys(),
+        )
+
     def increment_eviction_num_tokens(self, num_tokens: int) -> None:
         self.eviction_num_tokens.labels(**self.labels).inc(num_tokens)
 
@@ -2213,6 +2228,12 @@ class RadixCacheMetricsCollector(_StatLoggerDIMixin):
         self.hicache_dropped_tokens.labels(**self.labels, reason=reason, pool=pool).inc(
             num_tokens
         )
+
+    def increment_mamba_spill_events(self, num_events: int) -> None:
+        self.mamba_spill_events.labels(**self.labels).inc(num_events)
+
+    def increment_mamba_spill_slots(self, num_slots: int) -> None:
+        self.mamba_spill_slots.labels(**self.labels).inc(num_slots)
 
 
 class EncoderMetricsCollector(_StatLoggerDIMixin):

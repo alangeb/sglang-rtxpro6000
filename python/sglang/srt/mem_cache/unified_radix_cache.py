@@ -5,6 +5,7 @@ import logging
 import os
 import threading
 import time
+from collections import defaultdict
 from dataclasses import replace
 from queue import Queue
 from typing import TYPE_CHECKING, Iterator, NamedTuple, Optional, Sequence, TypeVar
@@ -61,6 +62,7 @@ from sglang.srt.mem_cache.unified_cache.components import (
     BASE_COMPONENT_TYPE,
     CacheTransferPhase,
     ComponentType,
+    EvictLayer,
     FullComponent,
     MambaComponent,
     PrepareLoadBackResult,
@@ -347,6 +349,8 @@ class UnifiedRadixCache(BasePrefixCache):
         # Reset Controller.
         self.session.slots.clear()
         self.ongoing_write_through: dict[int, _OngoingWriteThrough] = {}
+        # ack id -> spilled node whose device slot is freed at that ack.
+        self.ongoing_mamba_spill: dict[int, NodeId] = {}
         self.ongoing_load_back: dict[int, _OngoingLoadBack] = {}
         self.enable_storage = False
         self.prefetch_loaded_tokens_by_reqid: dict[str, int] = {}
@@ -1369,6 +1373,83 @@ class UnifiedRadixCache(BasePrefixCache):
             node_id, lock_params, [node_id]
         )
 
+    def _execute_mamba_backup(self, node_id: NodeId) -> bool:
+        """Issue one proactive Mamba D->H spill (D1); True when the copy is in flight.
+
+        Mamba-only: the KV arm is deliberately absent (``_build_backup_spec``
+        asserts the Full device value, which a Mamba victim need not have), so
+        the host slot comes from the Mamba pool of the host pool group rather
+        than from the KV anchor. The victim's device slot stays live until the
+        write ack frees it -- freeing it alongside the async copy would let the
+        copy read a recycled slot.
+        """
+        spec = self.tree_core.build_mamba_backup_spec(node_id)
+        if spec is None:
+            return False
+        _, comp_xfers = spec
+        mamba_xfers = comp_xfers[ComponentType.MAMBA]
+        num_slots = sum(len(x.device_indices) for x in mamba_xfers)
+        host_indices = self.host_pool_group.alloc(
+            num_slots,
+            pool=PoolName.MAMBA,
+            reclaim=lambda size: self.evict_host(size, ComponentType.MAMBA),
+        )
+        if host_indices is None:
+            return False
+        for xfer in mamba_xfers:
+            xfer.host_indices = host_indices[: len(xfer.device_indices)]
+        aux_xfers = [x for xfers in comp_xfers.values() for x in xfers]
+        # Empty KV payload: the anchor arm transfers nothing, the Mamba pool
+        # transfer carries the state.
+        if self.cache_controller.write(
+            torch.empty(0, dtype=torch.int64),
+            node_id=node_id,
+            extra_pools=aux_xfers or None,
+        ) is None:
+            self.host_pool_group.free(host_indices, pool=PoolName.MAMBA)
+            return False
+        self.tree_core.commit_backup(node_id, torch.empty(0, dtype=torch.int64), comp_xfers)
+        self.tree_core.mark_write_through_pending(node_id)
+        # No lock: the spill's device slot is pinned by the pending mark alone
+        # (the ack frees it), and locking would flip the node's evictable
+        # accounting for the copy's duration without any request needing it.
+        ack_id = node_id
+        self.ongoing_write_through[ack_id] = _OngoingWriteThrough(
+            node_id, None, [node_id]
+        )
+        self.ongoing_mamba_spill[ack_id] = node_id
+        if self.metrics_collector is not None:
+            self.metrics_collector.increment_mamba_spill_events(1)
+        return True
+
+    def _finish_mamba_spill(self, node_id: NodeId) -> None:
+        """Free a spilled node's device Mamba slot once its D->H copy landed.
+
+        Mirrors the device half of ``UnifiedTreeCore._demote`` for one component:
+        tombstone + LRU detach, drain the pending free so the allocator sees the
+        slot, then the host-LRU insert that makes the copy reclaimable.
+        """
+        ct = ComponentType.MAMBA
+        node = self.tree_core.node_by_id(node_id)
+        tracker = {c: 0 for c in self.tree_components}
+        device_frees: dict[ComponentType, list[torch.Tensor]] = defaultdict(list)
+        host_frees: dict[ComponentType, list[torch.Tensor]] = defaultdict(list)
+        self.tree_core._evict_component_and_detach_lru(
+            node,
+            self.components[ct],
+            device_frees,
+            host_frees,
+            target=EvictLayer.DEVICE,
+            tracker=tracker,
+        )
+        self._free_values(device_frees, host_frees)
+        self.tree_core._for_each_component_lru(
+            node, UnifiedLRUList.insert_mru, target=EvictLayer.HOST, skip_existing=True
+        )
+        self.tree_core._update_evictable_leaf_sets(node)
+        if self.metrics_collector is not None and tracker[ct] > 0:
+            self.metrics_collector.increment_mamba_spill_slots(tracker[ct])
+
     def _replace_pending_write_through_node(
         self, ack_id: int, old_node_id: NodeId, new_node_ids: list[NodeId]
     ) -> None:
@@ -1404,6 +1485,10 @@ class UnifiedRadixCache(BasePrefixCache):
             ack_id
         )
         self.tree_core.finish_write_through(publish_node_ids, ack_id)
+        spill_node_id = self.ongoing_mamba_spill.pop(ack_id, None)
+        if spill_node_id is not None:
+            # The D->H copy landed: only now may the device slot be recycled.
+            self._finish_mamba_spill(spill_node_id)
         if lock_params is not None:
             self.dec_lock_ref(lock_node_id, lock_params)
         if self.enable_storage:

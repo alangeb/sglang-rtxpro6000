@@ -1421,6 +1421,33 @@ class UnifiedTreeCore(UnifiedTreeCoreInterface):
             self.node_by_id(tail_node_id), device_frees, host_frees
         )
 
+    def mamba_spill_oldest(self, max_victims: int) -> list[NodeId]:
+        """Select the oldest safe device-only Mamba checkpoints to spill (D1).
+
+        A victim holds a device state with no host copy, is unlocked (no request
+        lock, no session reference) and has no DMA in flight: a second backup
+        would allocate an orphaned host slot, and a load-back has that slot's
+        host copy already on its way to the device. Selection only -- the caller
+        owns the D->H copy and frees the device slot at the write ack.
+        """
+        ct = ComponentType.MAMBA
+        lru = self.lru_lists[ct]
+        victims: list[NodeId] = []
+        node = lru.get_lru_no_lock()
+        while node is not None and lru.in_list(node) and len(victims) < max_victims:
+            cd = node.component_data[ct]
+            if (
+                cd.value is not None
+                and cd.host_value is None
+                and cd.lock_ref == 0
+                and self.components_by_type[ct].session_ref(node) == 0
+                and node.write_through_pending_id is None
+                and node.load_back_pending_id is None
+            ):
+                victims.append(node.id)
+            node = lru.get_prev_no_lock(node)
+        return victims
+
     def _reclaim_full_host_duplicates(
         self,
         num_tokens: int,
