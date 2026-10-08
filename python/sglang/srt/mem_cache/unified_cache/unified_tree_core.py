@@ -1427,8 +1427,15 @@ class UnifiedTreeCore(UnifiedTreeCoreInterface):
         A victim holds a device state with no host copy, is unlocked (no request
         lock, no session reference) and has no DMA in flight: a second backup
         would allocate an orphaned host slot, and a load-back has that slot's
-        host copy already on its way to the device. Selection only -- the caller
-        owns the D->H copy and frees the device slot at the write ack.
+        host copy already on its way to the device.
+
+        The victim must already hold a FULL host copy: the tree invariant
+        (sanity_check PART 2) requires aux host data to be backed by Full host
+        data in write_through mode, and a device-resident node keeps its Full
+        host copy (host eviction only touches evicted host leaves), so the
+        invariant holds for the node's whole lifetime after the spill.
+        Selection only -- the caller owns the D->H copy and frees the device
+        slot at the write ack.
         """
         ct = ComponentType.MAMBA
         lru = self.lru_lists[ct]
@@ -1440,6 +1447,7 @@ class UnifiedTreeCore(UnifiedTreeCoreInterface):
                 cd.value is not None
                 and cd.host_value is None
                 and cd.lock_ref == 0
+                and node.component_data[BASE_COMPONENT_TYPE].host_value is not None
                 and self.components_by_type[ct].session_ref(node) == 0
                 and node.write_through_pending_id is None
                 and node.load_back_pending_id is None
