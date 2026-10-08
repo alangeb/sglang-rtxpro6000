@@ -1874,6 +1874,26 @@ class UnifiedTreeCore(UnifiedTreeCoreInterface):
                 comp_xfers[comp.component_type] = t
         return device_value, comp_xfers
 
+    def build_mamba_backup_spec(self, node_id: NodeId):
+        """Mamba-only D->H backup spec for the proactive spill (D1).
+
+        ``_build_backup_spec`` asserts the *Full* device value exists, which a
+        device-only Mamba victim need not guarantee (its KV may already be a
+        host tombstone, and the KV slice is not what the spill is after).
+        Returns an empty KV device value plus the Mamba transfer, or None when
+        the node has nothing left to spill.
+        """
+        node = self.node_by_id(node_id)
+        cd = node.component_data[ComponentType.MAMBA]
+        if cd.value is None or cd.host_value is not None:
+            return None
+        xfers = self.components_by_type[ComponentType.MAMBA].build_hicache_transfers(
+            node, CacheTransferPhase.BACKUP_HOST
+        )
+        if not xfers:
+            return None
+        return torch.empty(0, dtype=torch.int64), {ComponentType.MAMBA: xfers}
+
     def build_storage_backup_spec(
         self, node_id: NodeId, pass_prefix_keys: bool
     ) -> Optional[StorageBackupSpec]:
