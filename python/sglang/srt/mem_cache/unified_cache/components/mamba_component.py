@@ -531,10 +531,15 @@ class MambaComponent(TreeComponent):
             or not self.tree_core.enable_hicache
         ):
             return
-        if (
-            self.cache._component_available_size(ComponentType.MAMBA) >= low
-            or self.cache.buffer_pipeline is not None
-        ):
+        available = self.cache.req_to_token_pool.mamba_allocator.available_size()
+        if mamba_host_debug_enabled():
+            logger.info(
+                "[MAMBA-SPILL] maybe_spill low=%s available=%s buffer=%s",
+                low,
+                available,
+                self.cache.buffer_pipeline is not None,
+            )
+        if available >= low or self.cache.buffer_pipeline is not None:
             return
         self._spill_oldest_to_host(8)
 
