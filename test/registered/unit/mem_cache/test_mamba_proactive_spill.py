@@ -57,6 +57,7 @@ class _FakeCore:
     """Minimal `self` running the REAL selection / spec methods unbound."""
 
     mamba_spill_oldest = UnifiedTreeCore.mamba_spill_oldest
+    _mamba_spill_victim_eligible = UnifiedTreeCore._mamba_spill_victim_eligible
     build_mamba_backup_spec = UnifiedTreeCore.build_mamba_backup_spec
 
     def __init__(self):

@@ -72,6 +72,10 @@ from sglang.srt.mem_cache.unified_cache.components import (
 from sglang.srt.mem_cache.unified_cache.session_ref_tracker import (
     UnifiedSessionRefTracker,
 )
+from sglang.srt.mem_cache.unified_cache.component_type import (
+    mamba_completion_retention_enabled,
+    mamba_host_debug_enabled,
+)
 from sglang.srt.mem_cache.unified_cache.storage_attachment import StorageAttachment
 from sglang.srt.mem_cache.unified_cache.tree_core_registry import create_tree_core
 from sglang.srt.mem_cache.unified_cache.unified_tree_core import (  # noqa: F401
@@ -873,6 +877,25 @@ class UnifiedRadixCache(BasePrefixCache):
             insert_params.key = radix_key
             insert_params.value = values
             result = self.insert(insert_params)
+
+            # D2: mark the terminal node as a completion boundary so the
+            # proactive D1 spill prefers demoting it to host under device mamba
+            # pool pressure (preserving the exact rewind target for follow-up
+            # turns). Inert unless SGLANG_MAMBA_COMPLETION_RETENTION=1.
+            if (
+                mamba_completion_retention_enabled()
+                and result.last_device_node is not None
+                and result.last_device_node != self.tree_core.root_node.id
+            ):
+                boundary_node = self.tree_core.node_by_id(result.last_device_node)
+                boundary_node.completion_boundary = True
+                if self.metrics_collector is not None:
+                    self.metrics_collector.increment_mamba_completion_boundary_captured()
+                if mamba_host_debug_enabled():
+                    logger.info(
+                        "[MAMBA-COMP-RET] captured completion boundary node=%s",
+                        result.last_device_node,
+                    )
 
             # Free unaligned tail (+ deferred truncation tail)
             segments = [(kv_indices[page_aligned_len:], page_aligned_len)]

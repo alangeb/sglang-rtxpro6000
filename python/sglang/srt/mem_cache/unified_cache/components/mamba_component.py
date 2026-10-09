@@ -38,6 +38,7 @@ from sglang.srt.mem_cache.unified_cache.components.tree_component import (
     get_and_increase_time_counter,
 )
 from sglang.srt.mem_cache.unified_cache.component_type import (
+    mamba_completion_retention_enabled,
     mamba_host_anchor_enabled,
     mamba_host_debug_enabled,
     mamba_spill_low_water,
@@ -549,6 +550,23 @@ class MambaComponent(TreeComponent):
         for node_id in victims:
             if self.cache._execute_mamba_backup(node_id):
                 spilled += 1
+        # D2: count completion-boundary checkpoints demoted to host (preferred
+        # victims) and those found at-risk (device-only, no FULL host copy).
+        if mamba_completion_retention_enabled() and self.cache.metrics_collector:
+            demoted = sum(
+                1
+                for node_id in victims
+                if self.tree_core.node_by_id(node_id).completion_boundary
+            )
+            if demoted:
+                self.cache.metrics_collector.increment_mamba_completion_boundary_demoted(
+                    demoted
+                )
+            dropped = self.tree_core._completion_boundary_dropped
+            if dropped:
+                self.cache.metrics_collector.increment_mamba_completion_boundary_dropped(
+                    dropped
+                )
         if spilled and mamba_host_debug_enabled():
             logger.info(
                 "[MAMBA-HOST] spill: issued %d/%d node_ids=%s available=%d",
@@ -753,6 +771,14 @@ class MambaComponent(TreeComponent):
             )
         ):
             return PrepareLoadBackResult()
+        # D2: a rewind to a retained completion boundary (host-only mamba node
+        # loaded back to device). Inert unless SGLANG_MAMBA_COMPLETION_RETENTION=1.
+        if (
+            mamba_completion_retention_enabled()
+            and self.cache.metrics_collector is not None
+            and self.tree_core.node_by_id(node_id).completion_boundary
+        ):
+            self.cache.metrics_collector.increment_mamba_completion_boundary_restored()
         dst = self.cache.req_to_token_pool.mamba_allocator.alloc(1)
         if dst is None:
             self.cache.evict_for_alloc(EvictParams(num_tokens=0, mamba_num=1))
