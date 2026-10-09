@@ -53,6 +53,7 @@ from sglang.srt.mem_cache.unified_cache.cache_action import (
 )
 from sglang.srt.mem_cache.unified_cache.component_type import (
     host_anchored,
+    mamba_completion_retention_enabled,
     mamba_host_anchor_enabled,
     mamba_host_debug_enabled,
 )
@@ -140,6 +141,12 @@ class UnifiedTreeNode:
         # Anchor NodeId of an in-flight H->D load-back reading this node's
         # host slots; such host copies must not be reclaimed until the ack.
         self.load_back_pending_id: Optional[int] = None
+        # D2: True when this node is the terminal Mamba state of a finished
+        # OpenAI/chat completion (a "completion boundary"). The proactive D1
+        # spill prefers demoting completion-boundary checkpoints to host over
+        # older non-boundary checkpoints under device mamba pool pressure.
+        # Inert unless SGLANG_MAMBA_COMPLETION_RETENTION=1.
+        self.completion_boundary: bool = False
 
     def component(self, component_type: ComponentType) -> ComponentData:
         return self.component_data[component_type]
@@ -480,6 +487,11 @@ class UnifiedTreeCore(UnifiedTreeCoreInterface):
         self.full_host_duplicates: dict[NodeId, UnifiedTreeNode] = {}
         # Rolling digest of reclaim victim ids, cross-checked across TP ranks.
         self.write_back_duplicate_reclaim_digest: int = 0
+        # D2: completion-boundary checkpoints found device-only without a FULL
+        # host copy during the last spill walk (at risk of loss). Best-effort
+        # proxy for the "dropped" counter; read by the cache layer after a
+        # spill. Inert unless SGLANG_MAMBA_COMPLETION_RETENTION=1.
+        self._completion_boundary_dropped: int = 0
 
         self._empty_match_result = MatchResult(
             device_indices=torch.empty(
@@ -1421,40 +1433,80 @@ class UnifiedTreeCore(UnifiedTreeCoreInterface):
             self.node_by_id(tail_node_id), device_frees, host_frees
         )
 
-    def mamba_spill_oldest(self, max_victims: int) -> list[NodeId]:
-        """Select the oldest safe device-only Mamba checkpoints to spill (D1).
+    def _mamba_spill_victim_eligible(self, node: UnifiedTreeNode, ct) -> bool:
+        """D1 spill eligibility (shared by the D2 two-pass selection).
 
-        A victim holds a device state with no host copy, is unlocked (no request
-        lock, no session reference) and has no DMA in flight: a second backup
-        would allocate an orphaned host slot, and a load-back has that slot's
-        host copy already on its way to the device.
+        A victim holds a device Mamba state with no host copy, is unlocked (no
+        request lock, no session reference) and has no DMA in flight: a second
+        backup would allocate an orphaned host slot, and a load-back has that
+        slot's host copy already on its way to the device.
 
         The victim must already hold a FULL host copy: the tree invariant
         (sanity_check PART 2) requires aux host data to be backed by Full host
         data in write_through mode, and a device-resident node keeps its Full
         host copy (host eviction only touches evicted host leaves), so the
         invariant holds for the node's whole lifetime after the spill.
+        """
+        cd = node.component_data[ct]
+        return (
+            cd.value is not None
+            and cd.host_value is None
+            and cd.lock_ref == 0
+            and node.component_data[BASE_COMPONENT_TYPE].host_value is not None
+            and self.components_by_type[ct].session_ref(node) == 0
+            and node.write_through_pending_id is None
+            and node.load_back_pending_id is None
+        )
+
+    def mamba_spill_oldest(self, max_victims: int) -> list[NodeId]:
+        """Select the oldest safe device-only Mamba checkpoints to spill (D1).
+
         Selection only -- the caller owns the D->H copy and frees the device
         slot at the write ack.
+
+        D2: when SGLANG_MAMBA_COMPLETION_RETENTION=1, completion-boundary
+        checkpoints (terminal Mamba states of finished completions) are
+        preferred over older non-boundary checkpoints, so device mamba pool
+        pressure demotes the most-valuable rewind targets to host first instead
+        of leaving them to be destroyed by eviction. Each pass keeps oldest-first
+        order; the flag-off path is byte-identical to the pre-D2 single walk.
         """
         ct = ComponentType.MAMBA
         lru = self.lru_lists[ct]
-        victims: list[NodeId] = []
+        if not mamba_completion_retention_enabled():
+            self._completion_boundary_dropped = 0
+            victims: list[NodeId] = []
+            node = lru.get_lru_no_lock()
+            while node is not None and lru.in_list(node) and len(victims) < max_victims:
+                if self._mamba_spill_victim_eligible(node, ct):
+                    victims.append(node.id)
+                node = lru.get_prev_no_lock(node)
+            return victims
+        # D2 two-pass: completion boundaries first, then oldest non-boundaries.
+        # A completion boundary that is device-only (no host copy) and ineligible
+        # (no FULL host copy) cannot be demoted to host; count it as at-risk
+        # (dropped proxy). A host-backed boundary is safe (not at risk).
+        boundary_victims: list[NodeId] = []
+        other_victims: list[NodeId] = []
+        dropped = 0
         node = lru.get_lru_no_lock()
-        while node is not None and lru.in_list(node) and len(victims) < max_victims:
+        while node is not None and lru.in_list(node):
             cd = node.component_data[ct]
             if (
-                cd.value is not None
+                node.completion_boundary
+                and cd.value is not None
                 and cd.host_value is None
-                and cd.lock_ref == 0
-                and node.component_data[BASE_COMPONENT_TYPE].host_value is not None
-                and self.components_by_type[ct].session_ref(node) == 0
-                and node.write_through_pending_id is None
-                and node.load_back_pending_id is None
+                and not self._mamba_spill_victim_eligible(node, ct)
             ):
-                victims.append(node.id)
+                dropped += 1
+            if self._mamba_spill_victim_eligible(node, ct):
+                if node.completion_boundary:
+                    boundary_victims.append(node.id)
+                else:
+                    other_victims.append(node.id)
             node = lru.get_prev_no_lock(node)
-        return victims
+        self._completion_boundary_dropped = dropped
+        return (boundary_victims + other_victims)[:max_victims]
 
     def _reclaim_full_host_duplicates(
         self,

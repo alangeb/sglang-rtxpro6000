@@ -102,6 +102,28 @@ def mamba_spill_low_water() -> int:
     return _mamba_spill_low_water_cache
 
 
+MAMBA_COMPLETION_RETENTION_ENV = "SGLANG_MAMBA_COMPLETION_RETENTION"
+_mamba_completion_retention_cache: Optional[bool] = None
+
+
+def mamba_completion_retention_enabled() -> bool:
+    """Cached read of SGLANG_MAMBA_COMPLETION_RETENTION (default off).
+
+    D2: completion-boundary Mamba checkpoint retention. When on, the terminal
+    Mamba state of a finished OpenAI/chat completion is marked as a completion
+    boundary, and the proactive D1 spill prefers demoting completion-boundary
+    checkpoints to host (preserving them) over older non-boundary checkpoints
+    when device mamba pool pressure fires. Default OFF: with the env unset the
+    behaviour is byte-identical to the pre-D2 tree.
+    """
+    global _mamba_completion_retention_cache
+    if _mamba_completion_retention_cache is None:
+        _mamba_completion_retention_cache = (
+            os.environ.get(MAMBA_COMPLETION_RETENTION_ENV, "0").strip() == "1"
+        )
+    return _mamba_completion_retention_cache
+
+
 def host_anchored(node: Any) -> bool:
     """True if *node* may stay in the tree on host-tier evidence alone.
 

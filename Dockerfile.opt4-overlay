@@ -1,0 +1,2 @@
+FROM sglang-rtxpro6000:mamba-host-anchor
+COPY --chown=root:root python/ /opt/pennyroyal/python/
