@@ -2200,6 +2200,37 @@ class RadixCacheMetricsCollector(_StatLoggerDIMixin):
             labelnames=labels.keys(),
         )
 
+        self.mamba_completion_boundary_captured = Counter(
+            name="sglang:mamba_completion_boundary_captured_total",
+            documentation="D2: terminal Mamba states of finished OpenAI/chat "
+            "completions marked as completion boundaries. Only moves while "
+            "SGLANG_MAMBA_COMPLETION_RETENTION=1.",
+            labelnames=labels.keys(),
+        )
+
+        self.mamba_completion_boundary_demoted = Counter(
+            name="sglang:mamba_completion_boundary_demoted_total",
+            documentation="D2: completion-boundary checkpoints preferred as "
+            "proactive spill victims (demoted to host under device mamba pool "
+            "pressure instead of older non-boundary checkpoints).",
+            labelnames=labels.keys(),
+        )
+
+        self.mamba_completion_boundary_restored = Counter(
+            name="sglang:mamba_completion_boundary_restored_total",
+            documentation="D2: completion-boundary checkpoints loaded back "
+            "from host to device (a rewind to a retained boundary).",
+            labelnames=labels.keys(),
+        )
+
+        self.mamba_completion_boundary_dropped = Counter(
+            name="sglang:mamba_completion_boundary_dropped_total",
+            documentation="D2: completion-boundary checkpoints found device-"
+            "only without a FULL host copy during a spill walk (at risk of "
+            "loss; could not be demoted to host).",
+            labelnames=labels.keys(),
+        )
+
     def increment_eviction_num_tokens(self, num_tokens: int) -> None:
         self.eviction_num_tokens.labels(**self.labels).inc(num_tokens)
 
@@ -2234,6 +2265,18 @@ class RadixCacheMetricsCollector(_StatLoggerDIMixin):
 
     def increment_mamba_spill_slots(self, num_slots: int) -> None:
         self.mamba_spill_slots.labels(**self.labels).inc(num_slots)
+
+    def increment_mamba_completion_boundary_captured(self, num: int = 1) -> None:
+        self.mamba_completion_boundary_captured.labels(**self.labels).inc(num)
+
+    def increment_mamba_completion_boundary_demoted(self, num: int = 1) -> None:
+        self.mamba_completion_boundary_demoted.labels(**self.labels).inc(num)
+
+    def increment_mamba_completion_boundary_restored(self, num: int = 1) -> None:
+        self.mamba_completion_boundary_restored.labels(**self.labels).inc(num)
+
+    def increment_mamba_completion_boundary_dropped(self, num: int = 1) -> None:
+        self.mamba_completion_boundary_dropped.labels(**self.labels).inc(num)
 
 
 class EncoderMetricsCollector(_StatLoggerDIMixin):
