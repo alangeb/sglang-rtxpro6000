@@ -878,23 +878,46 @@ class UnifiedRadixCache(BasePrefixCache):
             insert_params.value = values
             result = self.insert(insert_params)
 
-            # D2: mark the terminal node as a completion boundary so the
-            # proactive D1 spill prefers demoting it to host under device mamba
-            # pool pressure (preserving the exact rewind target for follow-up
-            # turns). Inert unless SGLANG_MAMBA_COMPLETION_RETENTION=1.
-            if (
-                mamba_completion_retention_enabled()
-                and result.last_device_node is not None
-                and result.last_device_node != self.tree_core.root_node.id
-            ):
-                boundary_node = self.tree_core.node_by_id(result.last_device_node)
-                boundary_node.completion_boundary = True
-                if self.metrics_collector is not None:
-                    self.metrics_collector.increment_mamba_completion_boundary_captured()
-                if mamba_host_debug_enabled():
+            # D2: mark the completion boundary. The final insert can return the
+            # tree root when the request's KV prefix was already inserted during
+            # unfinished caching, so fall back to the deepest node match for the
+            # page-aligned key or the request's current last node.
+            boundary_node_ids: set[int] = set()
+            if mamba_completion_retention_enabled():
+                if result.last_device_node is not None:
+                    boundary_node_ids.add(int(result.last_device_node))
+                if (
+                    not boundary_node_ids
+                    or (
+                        len(boundary_node_ids) == 1
+                        and next(iter(boundary_node_ids)) == self.tree_core.root_node.id
+                    )
+                ) and page_aligned_len > 0:
+                    match_result = self.match_prefix(MatchPrefixParams(key=radix_key, req=req))
+                    if match_result.last_device_node is not None:
+                        boundary_node_ids.add(int(match_result.last_device_node))
+                if (
+                    not boundary_node_ids
+                    or (
+                        len(boundary_node_ids) == 1
+                        and next(iter(boundary_node_ids)) == self.tree_core.root_node.id
+                    )
+                ) and getattr(req, "last_node", None) is not None:
+                    boundary_node_ids.add(int(req.last_node))
+                marked = 0
+                for node_id in sorted(boundary_node_ids):
+                    if node_id == self.tree_core.root_node.id:
+                        continue
+                    boundary_node = self.tree_core.node_by_id(node_id)
+                    if not boundary_node.completion_boundary:
+                        boundary_node.completion_boundary = True
+                        marked += 1
+                if marked and self.metrics_collector is not None:
+                    self.metrics_collector.increment_mamba_completion_boundary_captured(marked)
+                if marked and mamba_host_debug_enabled():
                     logger.info(
-                        "[MAMBA-COMP-RET] captured completion boundary node=%s",
-                        result.last_device_node,
+                        "[MAMBA-COMP-RET] captured completion boundary nodes=%s",
+                        sorted(boundary_node_ids),
                     )
 
             # Free unaligned tail (+ deferred truncation tail)
