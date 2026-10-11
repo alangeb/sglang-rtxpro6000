@@ -856,6 +856,14 @@ class UnifiedTreeCore(UnifiedTreeCoreInterface):
         prefix_chunks: list[torch.Tensor] = []
         node = self.node_by_id(from_node_id)
         while node is not until_node:
+            # PER_SLOT (SGLANG_MAMBA_PER_SLOT=1): until_node (last_node) can be
+            # DEEPER than from_node (best_match_node) when a node has FULL on
+            # device but MAMBA host-only; the ancestor walk would then run past
+            # the root into None (crash). FULL KV is already resident on device
+            # in that case, so return empty -- the Mamba host->device load is
+            # handled separately (prepare_load_back).
+            if node is None or node is self.root_node:
+                return self._empty_match_result.device_indices
             value = node.component_data[BASE_COMPONENT_TYPE].value
             assert value is not None
             prefix_chunks.append(value)
