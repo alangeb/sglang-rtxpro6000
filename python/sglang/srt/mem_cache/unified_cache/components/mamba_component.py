@@ -210,6 +210,27 @@ class MambaComponent(TreeComponent):
         names = [name for name, pinned in pins.items() if pinned == node_id]
         return "+".join(names) if names else "released"
 
+    def resume_protected(self, node: UnifiedTreeNode) -> bool:
+        """True when any resume mechanism still needs this node's state.
+
+        D1 spill guard: a resume pin (``_resume_pins``), an in-flight host
+        lease (``_resume_leases``) or an unsettled backup promise
+        (``_pending_resume_backup``) means some session will rewind through
+        this checkpoint, so its device slot must not be demoted behind its
+        back. Pinned nodes normally also carry a host copy (and so fail the
+        plain eligibility test), but the check is deliberately independent:
+        pin bookkeeping and component data may drift during teardown, and a
+        spill that races a resume silently loses the rewind target.
+        """
+        pins = self._resume_pins
+        for session_pins in pins.values():
+            if node.id in session_pins.values():
+                return True
+        for leases in self._resume_leases.values():
+            if node.id in leases:
+                return True
+        return node.id in self._pending_resume_backup
+
     def _needed_resume_nodes(self, session_id: str) -> set[int]:
         return set(self._resume_pins.get(session_id, {}).values())
 
