@@ -321,3 +321,83 @@ class TestMambaSpillBackup(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestResumePinSafety(unittest.TestCase):
+    """A node any session plans to rewind through is never a spill victim.
+
+    Covers the three v3 resume structures (_resume_pins, _resume_leases,
+    _pending_resume_backup) via the component's resume_protected() guard,
+    wired into UnifiedTreeCore._mamba_spill_victim_eligible.
+    """
+
+    def _core_with_guard(self):
+        core = _FakeCore()
+        comp = core.components_by_type[MAMBA]
+        protected: set = set()
+        comp.resume_protected = lambda n: n.id in protected
+        return core, protected
+
+    def test_component_without_guard_still_selects(self):
+        # Backwards compatible: a component lacking resume_protected (e.g. the
+        # SimpleNamespace fake, or a non-mamba component) is unaffected.
+        core = _FakeCore()
+        a = core.add(core.root_node, 1)
+        self.assertEqual(core.mamba_spill_oldest(8), [a.id])
+
+    def test_resume_pinned_node_is_skipped(self):
+        core, protected = self._core_with_guard()
+        a = core.add(core.root_node, 1)
+        b = core.add(a, 2)
+        protected.add(b.id)
+        self.assertEqual(core.mamba_spill_oldest(8), [a.id])
+        protected.discard(b.id)
+        self.assertEqual(core.mamba_spill_oldest(8), [a.id, b.id])
+
+    def test_guard_protects_under_d2_two_pass_too(self):
+        ct_mod._mamba_completion_retention_cache = True
+        try:
+            core, protected = self._core_with_guard()
+            a = core.add(core.root_node, 1)
+            b = core.add(a, 2)
+            b.completion_boundary = True
+            protected.add(b.id)  # boundary AND pinned -> not a victim
+            self.assertEqual(core.mamba_spill_oldest(8), [a.id])
+        finally:
+            ct_mod._mamba_completion_retention_cache = None
+
+
+class TestResumeProtectedMethod(unittest.TestCase):
+    """resume_protected() itself, against the real dict structures."""
+
+    def _comp(self):
+        comp = MambaComponent.__new__(MambaComponent)
+        comp._resume_pins = {}
+        comp._resume_leases = {}
+        comp._pending_resume_backup = {}
+        return comp
+
+    def test_empty_structures_are_not_protected(self):
+        comp = self._comp()
+        node = _node(None, 7)
+        self.assertFalse(comp.resume_protected(node))
+
+    def test_pin_lease_and_pending_backup_each_protect(self):
+        comp = self._comp()
+        node = _node(None, 7)
+        comp._resume_pins["s1"] = {"match": node.id}
+        self.assertTrue(comp.resume_protected(node))
+        comp._resume_pins.clear()
+        comp._resume_leases["s1"] = {node.id: True}
+        self.assertTrue(comp.resume_protected(node))
+        comp._resume_leases.clear()
+        comp._pending_resume_backup[node.id] = {"s1": 3}
+        self.assertTrue(comp.resume_protected(node))
+
+    def test_other_sessions_entries_do_not_leak(self):
+        comp = self._comp()
+        node = _node(None, 7)
+        comp._resume_pins["s1"] = {"match": 999}
+        comp._resume_leases["s1"] = {998: True}
+        comp._pending_resume_backup[997] = {"s1": 1}
+        self.assertFalse(comp.resume_protected(node))

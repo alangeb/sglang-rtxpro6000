@@ -1448,7 +1448,7 @@ class UnifiedTreeCore(UnifiedTreeCoreInterface):
         invariant holds for the node's whole lifetime after the spill.
         """
         cd = node.component_data[ct]
-        return (
+        if not (
             cd.value is not None
             and cd.host_value is None
             and cd.lock_ref == 0
@@ -1456,7 +1456,13 @@ class UnifiedTreeCore(UnifiedTreeCoreInterface):
             and self.components_by_type[ct].session_ref(node) == 0
             and node.write_through_pending_id is None
             and node.load_back_pending_id is None
-        )
+        ):
+            return False
+        # Resume bookkeeping (pins/leases/pending backup promises) is owned by
+        # the component; a node any session plans to rewind through is never a
+        # spill victim, even if its component data looks demotable.
+        protected = getattr(self.components_by_type[ct], "resume_protected", None)
+        return protected is None or not protected(node)
 
     def mamba_spill_oldest(self, max_victims: int) -> list[NodeId]:
         """Select the oldest safe device-only Mamba checkpoints to spill (D1).

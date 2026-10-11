@@ -102,6 +102,30 @@ def mamba_spill_low_water() -> int:
     return _mamba_spill_low_water_cache
 
 
+MAMBA_ONLY_HOST_CACHE_ENV = "SGLANG_MAMBA_ONLY_HOST_CACHE"
+_mamba_only_host_cache_cache: Optional[bool] = None
+
+
+def mamba_only_host_cache_enabled() -> bool:
+    """Cached read of SGLANG_MAMBA_ONLY_HOST_CACHE (default off).
+
+    Lets the host tier exist for Mamba checkpoints alone. Without it the
+    assembler builds host pools only when a hicache budget exists, so
+    SGLANG_MAMBA_HOST_SIZE_GB would have nowhere to live with --hicache-size 0.
+    With this flag on *and* an explicit Mamba host size, the host stack is built
+    with a minimal KV/QSA placeholder pool. True zero-KV-host is not
+    architecturally possible: FULL is the tree anchor that every backup /
+    load-back transfer rides on, and sanity_check PART 2 requires aux host data
+    to be backed by Full host data. Default OFF: unset is upstream behaviour.
+    """
+    global _mamba_only_host_cache_cache
+    if _mamba_only_host_cache_cache is None:
+        _mamba_only_host_cache_cache = (
+            os.environ.get(MAMBA_ONLY_HOST_CACHE_ENV, "0").strip() == "1"
+        )
+    return _mamba_only_host_cache_cache
+
+
 MAMBA_COMPLETION_RETENTION_ENV = "SGLANG_MAMBA_COMPLETION_RETENTION"
 _mamba_completion_retention_cache: Optional[bool] = None
 
