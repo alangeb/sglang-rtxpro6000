@@ -1456,31 +1456,33 @@ class UnifiedTreeCore(UnifiedTreeCoreInterface):
         copy (host eviction only touches evicted host leaves), so the invariant
         holds for the node's whole lifetime after the spill.
 
-        Mamba-only host cache inverts that requirement. The KV host pool is then
-        the MINIMAL_KV_HOST_GB placeholder (17,728 tokens / 277 pages, pinned
-        permanently full as the tree anchor), so requiring a FULL host copy makes
-        *no* node eligible and the spill can never run -- which is what was
-        observed on the promoted :8001 config (484 low-water events, 0 spills
-        issued, 103 of 170 host slots used). The executor was already built for
-        this shape: build_mamba_backup_spec() deliberately omits the KV arm ("the
-        host slot comes from the Mamba pool of the host pool group rather than
-        from the KV anchor"), and PART 2 carries the matching carve-out. So under
-        mamba_only_host_cache_enabled() the FULL host term drops out and every
-        other term still applies.
+        Mamba-only host cache relaxes that one term. The KV host pool is then the
+        MINIMAL_KV_HOST_GB placeholder (17,728 tokens / 277 pages), which leaves
+        essentially no node able to satisfy it, so the spill selects nothing -- the
+        measured failure on the promoted :8001 config (484 low-water events, 0
+        spills issued, 103 of 170 host slots used). The executor was already built
+        for this shape: build_mamba_backup_spec() deliberately omits the KV arm
+        ("the host slot comes from the Mamba pool of the host pool group rather
+        than from the KV anchor"), and PART 2 carries the matching carve-out. Only
+        the FULL *host* term is relaxed: FULL *device* residency stays required,
+        because inc_lock_ref on a node with no FULL device value would lock nothing
+        at that node while PART 5 demands Full.lock_ref > 0 for every in-flight
+        write-through node.
         """
         cd = node.component_data[ct]
-        needs_full_host = not mamba_only_host_cache_enabled()
         if not (
             cd.value is not None
             and cd.host_value is None
             and cd.lock_ref == 0
-            and (
-                not needs_full_host
-                or node.component_data[BASE_COMPONENT_TYPE].host_value is not None
-            )
+            and node.component_data[BASE_COMPONENT_TYPE].value is not None
             and self.components_by_type[ct].session_ref(node) == 0
             and node.write_through_pending_id is None
             and node.load_back_pending_id is None
+        ):
+            return False
+        if (
+            not mamba_only_host_cache_enabled()
+            and node.component_data[BASE_COMPONENT_TYPE].host_value is None
         ):
             return False
         # Resume bookkeeping (pins/leases/pending backup promises) is owned by
@@ -2315,14 +2317,18 @@ class UnifiedTreeCore(UnifiedTreeCoreInterface):
                 if cd.host_value is not None and not full_hst:
                     # write_back reclaim takes only the Full host layer; an
                     # aux host slice may outlive it while Full device is live.
-                    # Mamba-only host cache is the intended third case: the KV
-                    # host pool is the MINIMAL_KV_HOST_GB placeholder, so a
-                    # spilled Mamba checkpoint lives on a node whose Full data
-                    # is device-resident and the D->H transfer needs no KV
-                    # anchor (build_mamba_backup_spec). The node still keeps
+                    # Mamba-only host cache is the intended third case, and it is
+                    # scoped narrowly: only Mamba (the sole component the spill
+                    # copies in that mode) and only when the node really is
+                    # host-anchored. The KV host pool is the MINIMAL_KV_HOST_GB
+                    # placeholder, so a spilled Mamba checkpoint lives on a node
+                    # whose Full data is device-resident. The node still keeps
                     # Full on the device layer, so the tree backbone holds.
                     if not (self.is_write_back and full_dev) and not (
-                        full_dev and mamba_only_host_cache_enabled()
+                        ct == ComponentType.MAMBA
+                        and full_dev
+                        and host_anchored(node)
+                        and mamba_only_host_cache_enabled()
                     ):
                         E(f"node {nid} {ct} host present but Full.host_value=None")
 
