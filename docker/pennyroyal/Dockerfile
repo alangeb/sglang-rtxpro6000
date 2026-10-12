@@ -134,12 +134,14 @@ RUN PENNY_EXPECTED_SOURCE_REVISION="$SOURCE_REVISION" pennyroyal --check \
       'from sglang.srt.mem_cache.cpp_utils.native_hash import get_native_hash; assert get_native_hash([1, 2, 3, 4], None, 4)' \
     && rm -rf /tmp/penny-hicache-check
 EXPOSE 8001
-# The probe reads PENNYROYAL_HEALTH_PORT so it follows the server instead of
-# assuming it: the canonical recipe serves 8001, the Pennyroyal-3 mamba-only
-# launch serves 30000 and publishes 8001:30000. A hardcoded 8001 makes Docker
-# report `unhealthy` for a container that is serving correctly.
-ENV PENNYROYAL_HEALTH_PORT=8001
+# The probe must not assume the port. The canonical recipe serves --port 8001;
+# the Pennyroyal-3 mamba-only launch serves --port 30000 and publishes
+# 8001:30000. A hardcoded port makes Docker report `unhealthy` for a container
+# that is serving correctly, and `restart: always` / `--wait condition=healthy`
+# act on that report. healthcheck.py resolves the port from PENNYROYAL_HEALTH_PORT
+# if set, else from the engine process's own --port in /proc, else 8001.
+COPY docker/pennyroyal/healthcheck.py /opt/pennyroyal/healthcheck.py
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20m --retries=3 \
-  CMD ["/opt/pennyroyal/.venv/bin/python", "-c", "import os,urllib.request; urllib.request.urlopen('http://127.0.0.1:%s/health' % os.environ.get('PENNYROYAL_HEALTH_PORT','8001'), timeout=3).close()"]
+  CMD ["/opt/pennyroyal/.venv/bin/python", "/opt/pennyroyal/healthcheck.py"]
 ENTRYPOINT ["/usr/local/bin/pennyroyal"]
 CMD ["next"]
