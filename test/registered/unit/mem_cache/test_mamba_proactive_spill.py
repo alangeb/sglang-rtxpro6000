@@ -154,6 +154,47 @@ class TestMambaSpillSelection(unittest.TestCase):
         node = core.add(core.root_node, 1, host=True)
         self.assertIsNone(core.build_mamba_backup_spec(node.id))
 
+    def test_mamba_only_allows_a_device_only_kv_victim(self):
+        """Mamba-only host cache drops the FULL host requirement: the KV host
+        pool is the MINIMAL_KV_HOST_GB placeholder, so no node can ever hold a
+        FULL host copy and the spill would otherwise never find a victim. The
+        D->H transfer is KV-less (build_mamba_backup_spec), so the node keeps
+        Full on the device layer and the tree backbone still holds."""
+        core = _FakeCore()
+        a = core.add(core.root_node, 1, full_host=False)
+        b = core.add(a, 2, full_host=False)
+        with mock.patch.object(ct_mod, "_mamba_only_host_cache_cache", True):
+            self.assertEqual(core.mamba_spill_oldest(8), [a.id, b.id])
+            spec = core.build_mamba_backup_spec(a.id)
+            self.assertIsNotNone(spec)
+            kv_indices, transfers = spec
+            self.assertEqual(int(kv_indices.numel()), 0)
+            self.assertEqual(list(transfers), [MAMBA])
+
+    def test_mamba_only_still_respects_every_other_guard(self):
+        """Flag on must not widen eligibility beyond the FULL host term."""
+        core = _FakeCore()
+        a = core.add(core.root_node, 1, full_host=False)
+        locked = core.add(a, 2, full_host=False)
+        sess = core.add(locked, 3, full_host=False)
+        pending = core.add(sess, 4, full_host=False)
+        spilled = core.add(pending, 5, full_host=False, device=True, host=True)
+        locked.component_data[MAMBA].lock_ref = 1
+        sess.component_data[MAMBA].session_ref = 1
+        pending.write_through_pending_id = pending.id
+        with mock.patch.object(ct_mod, "_mamba_only_host_cache_cache", True):
+            self.assertEqual(core.mamba_spill_oldest(8), [a.id])
+            self.assertIsNotNone(spilled)
+
+    def test_flag_off_path_is_unchanged_by_the_mamba_only_term(self):
+        """Default OFF is upstream behaviour: the same device-only-KV tree that
+        yields two victims with the flag on yields none with it off."""
+        core = _FakeCore()
+        a = core.add(core.root_node, 1, full_host=False)
+        core.add(a, 2, full_host=False)
+        with mock.patch.object(ct_mod, "_mamba_only_host_cache_cache", False):
+            self.assertEqual(core.mamba_spill_oldest(8), [])
+
 
 class TestMambaSpillTrigger(unittest.TestCase):
     def setUp(self):
