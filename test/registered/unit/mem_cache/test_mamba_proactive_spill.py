@@ -17,6 +17,7 @@ import torch
 from sglang.srt.mem_cache.hicache_storage import PoolName, PoolTransfer
 from sglang.srt.mem_cache.radix_cache import RadixKey
 from sglang.srt.mem_cache.unified_cache import component_type as ct_mod
+from sglang.srt.mem_cache.unified_cache import unified_tree_core as utc_mod
 from sglang.srt.mem_cache.unified_cache.components.mamba_component import (
     MambaComponent,
 )
@@ -605,3 +606,166 @@ class TestCheckpointInvalidationAccounting(unittest.TestCase):
     def test_result_field_defaults_empty(self):
         self.assertEqual(EvictDeviceLeafResult().mamba_host_invalidated, {})
         self.assertEqual(DropSubtreeNoHostResult().mamba_host_invalidated, {})
+
+
+COMPS3 = (ComponentType.FULL, ComponentType.SWA, ComponentType.MAMBA)
+SWA = ComponentType.SWA
+
+
+class _FakeSanityCore(_FakeCore):
+    """``_FakeCore`` plus the state ``sanity_check`` reads.
+
+    Binds the REAL ``sanity_check`` and every predicate it consults
+    (``_is_device_leaf``, ``_is_host_leaf``,
+    ``_is_settled_full_host_duplicate``, ``_collect_all_nodes``,
+    ``_check_lru_linked_list``), so the PART 2 verdict is the production
+    verdict. What stays hand-built is the *input* bookkeeping the check only
+    consumes: the leaf/duplicate sets and the size counters (set to the values
+    the hand-built tree implies), the root's Full lock, and the LRU membership
+    a host-resident aux node must have. ``components_by_type`` keeps the
+    ``SimpleNamespace`` stand-ins -- PART 2 never asks a component driver for
+    anything, and session validation is off.
+    """
+
+    sanity_check = UnifiedTreeCore.sanity_check
+    _is_device_leaf = UnifiedTreeCore._is_device_leaf
+    _is_host_leaf = UnifiedTreeCore._is_host_leaf
+    _is_settled_full_host_duplicate = UnifiedTreeCore._is_settled_full_host_duplicate
+    _collect_all_nodes = UnifiedTreeCore._collect_all_nodes
+    _check_lru_linked_list = UnifiedTreeCore._check_lru_linked_list
+    pretty_print = UnifiedTreeCore.pretty_print
+
+    def __init__(self):
+        super().__init__()
+        self.component_types = COMPS3
+        self.is_write_back = False
+        self.enable_session_radix_cache = False
+        self.evictable_device_leaves: set = set()
+        self.evictable_host_leaves: set = set()
+        self.full_host_duplicates: dict = {}
+        self._node_arena = self._ids
+        # One unlocked token of FULL device data (the single node); nothing else.
+        self.component_evictable_size_ = {ct: 0 for ct in COMPS3}
+        self.component_evictable_size_[FULL] = 1
+        self.component_protected_size_ = {ct: 0 for ct in COMPS3}
+        self.lru_lists = {ct: UnifiedLRUList(ct, COMPS3) for ct in COMPS3}
+        self.host_lru_lists = {
+            ct: UnifiedLRUList(ct, COMPS3, use_host_ptr=True) for ct in COMPS3
+        }
+        self.root_node = _node(None, 0, device=False)
+        self.root_node.component_data[FULL].lock_ref = 1
+        self._ids[self.root_node.id] = self.root_node
+
+    def add(
+        self, parent, token, *, host_lru: tuple[ComponentType, ...] = (), **kwargs
+    ):
+        """``_FakeCore.add`` plus host-LRU registration for host-resident aux
+        data, which the real insert/ack paths would have done."""
+        node = super().add(parent, token, **kwargs)
+        for ct in host_lru:
+            self.host_lru_lists[ct].insert_mru(node)
+        return node
+
+
+class TestSanityCheckMambaOnlyCarveOut(unittest.TestCase):
+    """PART 2 must allow Mamba host data with no Full host data in mamba-only
+    mode, and must keep reporting the same shape for any other component.
+
+    Calls the real ``UnifiedTreeCore.sanity_check`` (not an extracted
+    predicate): the carve-out is an inline branch of the "aux host data but no
+    Full host data" check, and a reviewer asked for end-to-end coverage of it.
+    The tree is one child of root -- the shape a proactive spill leaves behind
+    when the KV host pool is the ``MINIMAL_KV_HOST_GB`` placeholder: Full on
+    device, Mamba mirrored to host, no Full on host anywhere.
+    """
+
+    def setUp(self):
+        self._saved = (
+            ct_mod._mamba_only_host_cache_cache,
+            ct_mod._mamba_host_anchor_cache,
+        )
+        # host_anchored() is one of the carve-out's own terms, and it is gated
+        # by SGLANG_MAMBA_HOST_ANCHOR -- the mode the spill runs under.
+        ct_mod._mamba_host_anchor_cache = True
+
+    def tearDown(self):
+        (
+            ct_mod._mamba_only_host_cache_cache,
+            ct_mod._mamba_host_anchor_cache,
+        ) = self._saved
+
+    def _spilled_node(self, core, *, swa_host=False):
+        node = core.add(
+            core.root_node,
+            1,
+            device=False,
+            host=True,
+            full_host=False,
+            host_lru=(MAMBA,) + ((SWA,) if swa_host else ()),
+        )
+        if swa_host:
+            node.component_data[SWA].host_value = torch.tensor(
+                [3001], dtype=torch.int64
+            )
+        # A device-resident node with no children is a D-leaf, and it is not a
+        # duplicate (no Full host copy) -- the sets the check compares against.
+        core.evictable_device_leaves.add(node)
+        return node
+
+    def _check(self, core):
+        """Run the real PART 2 check without the failure-path tree dump/log."""
+        core.pretty_print = lambda: None
+        quiet = SimpleNamespace(error=lambda *a, **k: None)
+        with mock.patch.object(utc_mod, "logger", quiet):
+            core.sanity_check([], [])
+
+    def test_mamba_only_accepts_host_mamba_without_host_full(self):
+        """Carve-out: Mamba host data + Full on device + no Full host is legal
+        when mamba-only host cache is on, and illegal when it is off."""
+        core = _FakeSanityCore()
+        node = self._spilled_node(core)
+
+        with mock.patch.object(ct_mod, "_mamba_only_host_cache_cache", True):
+            self._check(core)  # must not raise
+        # The mode is what makes it pass, not the tree shape: flag off is the
+        # upstream corruption case.
+        with mock.patch.object(ct_mod, "_mamba_only_host_cache_cache", False):
+            with self.assertRaises(AssertionError) as ctx:
+                self._check(core)
+        self.assertIn("mamba host present but Full.host_value=None", str(ctx.exception))
+        self.assertIsNotNone(node.component_data[MAMBA].host_value)
+
+    def test_swa_host_without_host_full_is_still_corruption(self):
+        """Regression guard: the carve-out must not widen to other aux
+        components. Same node -- host-anchored through Mamba, Full on device,
+        mamba-only mode on -- plus a SWA host slice and no Full host copy: the
+        SWA slice is reported, the Mamba one is not."""
+        core = _FakeSanityCore()
+        self._spilled_node(core, swa_host=True)
+
+        with mock.patch.object(ct_mod, "_mamba_only_host_cache_cache", True):
+            with self.assertRaises(AssertionError) as ctx:
+                self._check(core)
+        msg = str(ctx.exception)
+        self.assertIn("swa host present but Full.host_value=None", msg)
+        self.assertNotIn("mamba host present", msg)
+
+    def test_host_mamba_needs_full_device_to_be_exempt(self):
+        """The carve-out is also scoped by Full-on-device: a host-anchored node
+        whose Full data lives on neither tier is a dead node and stays an error
+        even with the flag on."""
+        core = _FakeSanityCore()
+        node = self._spilled_node(core)
+        # Full leaves the device tier too; re-home the bookkeeping the real
+        # eviction path would have moved, so only the PART 2 verdicts remain.
+        node.component_data[FULL].value = None
+        core.evictable_device_leaves.discard(node)
+        core.evictable_host_leaves.add(node)
+        core.component_evictable_size_[FULL] = 0
+
+        with mock.patch.object(ct_mod, "_mamba_only_host_cache_cache", True):
+            with self.assertRaises(AssertionError) as ctx:
+                self._check(core)
+        msg = str(ctx.exception)
+        self.assertIn("mamba host present but Full.host_value=None", msg)
+        self.assertIn("dead: no Full device and no Full host", msg)
