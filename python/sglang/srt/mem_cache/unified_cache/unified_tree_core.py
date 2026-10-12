@@ -56,6 +56,7 @@ from sglang.srt.mem_cache.unified_cache.component_type import (
     mamba_completion_retention_enabled,
     mamba_host_anchor_enabled,
     mamba_host_debug_enabled,
+    mamba_only_host_cache_enabled,
 )
 from sglang.srt.mem_cache.unified_cache.components import (
     _NUM_COMPONENT_TYPES,
@@ -1449,18 +1450,34 @@ class UnifiedTreeCore(UnifiedTreeCoreInterface):
         backup would allocate an orphaned host slot, and a load-back has that
         slot's host copy already on its way to the device.
 
-        The victim must already hold a FULL host copy: the tree invariant
-        (sanity_check PART 2) requires aux host data to be backed by Full host
-        data in write_through mode, and a device-resident node keeps its Full
-        host copy (host eviction only touches evicted host leaves), so the
-        invariant holds for the node's whole lifetime after the spill.
+        In write_through mode with a real KV host budget the victim must already
+        hold a FULL host copy: sanity_check PART 2 requires aux host data to be
+        backed by Full host data, and a device-resident node keeps its Full host
+        copy (host eviction only touches evicted host leaves), so the invariant
+        holds for the node's whole lifetime after the spill.
+
+        Mamba-only host cache inverts that requirement. The KV host pool is then
+        the MINIMAL_KV_HOST_GB placeholder (17,728 tokens / 277 pages, pinned
+        permanently full as the tree anchor), so requiring a FULL host copy makes
+        *no* node eligible and the spill can never run -- which is what was
+        observed on the promoted :8001 config (484 low-water events, 0 spills
+        issued, 103 of 170 host slots used). The executor was already built for
+        this shape: build_mamba_backup_spec() deliberately omits the KV arm ("the
+        host slot comes from the Mamba pool of the host pool group rather than
+        from the KV anchor"), and PART 2 carries the matching carve-out. So under
+        mamba_only_host_cache_enabled() the FULL host term drops out and every
+        other term still applies.
         """
         cd = node.component_data[ct]
+        needs_full_host = not mamba_only_host_cache_enabled()
         if not (
             cd.value is not None
             and cd.host_value is None
             and cd.lock_ref == 0
-            and node.component_data[BASE_COMPONENT_TYPE].host_value is not None
+            and (
+                not needs_full_host
+                or node.component_data[BASE_COMPONENT_TYPE].host_value is not None
+            )
             and self.components_by_type[ct].session_ref(node) == 0
             and node.write_through_pending_id is None
             and node.load_back_pending_id is None
@@ -2298,7 +2315,15 @@ class UnifiedTreeCore(UnifiedTreeCoreInterface):
                 if cd.host_value is not None and not full_hst:
                     # write_back reclaim takes only the Full host layer; an
                     # aux host slice may outlive it while Full device is live.
-                    if not (self.is_write_back and full_dev):
+                    # Mamba-only host cache is the intended third case: the KV
+                    # host pool is the MINIMAL_KV_HOST_GB placeholder, so a
+                    # spilled Mamba checkpoint lives on a node whose Full data
+                    # is device-resident and the D->H transfer needs no KV
+                    # anchor (build_mamba_backup_spec). The node still keeps
+                    # Full on the device layer, so the tree backbone holds.
+                    if not (self.is_write_back and full_dev) and not (
+                        full_dev and mamba_only_host_cache_enabled()
+                    ):
                         E(f"node {nid} {ct} host present but Full.host_value=None")
 
             # Every node must keep Full data on at least one layer.
