@@ -2216,6 +2216,16 @@ class RadixCacheMetricsCollector(_StatLoggerDIMixin):
             labelnames=labels.keys(),
         )
 
+        self.mamba_checkpoint_invalidated = Counter(
+            name="sglang:mamba_checkpoint_invalidated_total",
+            documentation="Mamba host checkpoints destroyed while still valid, "
+            "because the node's Full (KV) data was reclaimed: the state is only "
+            "useful as a rewind point for a KV prefix. reason=kv_delete (node "
+            "deleted on device eviction, including a write-back fallback drop) "
+            "or tombstone (cascade deleted a childless ancestor).",
+            labelnames=[*labels.keys(), "reason"],
+        )
+
         self.mamba_completion_boundary_restored = Counter(
             name="sglang:mamba_completion_boundary_restored_total",
             documentation="D2: completion-boundary checkpoints loaded back "
@@ -2271,6 +2281,9 @@ class RadixCacheMetricsCollector(_StatLoggerDIMixin):
 
     def increment_mamba_completion_boundary_demoted(self, num: int = 1) -> None:
         self.mamba_completion_boundary_demoted.labels(**self.labels).inc(num)
+
+    def increment_mamba_checkpoint_invalidated(self, reason: str, num: int) -> None:
+        self.mamba_checkpoint_invalidated.labels(**self.labels, reason=reason).inc(num)
 
     def increment_mamba_completion_boundary_restored(self, num: int = 1) -> None:
         self.mamba_completion_boundary_restored.labels(**self.labels).inc(num)

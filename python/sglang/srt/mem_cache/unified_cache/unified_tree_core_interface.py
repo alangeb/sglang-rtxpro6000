@@ -32,6 +32,11 @@ class BaseEvictionResult(msgspec.Struct):
     tracker: dict[ComponentType, int] = msgspec.field(
         default_factory=lambda: defaultdict(int)
     )
+    # Mamba host checkpoints this step destroyed (reason -> count). A step that
+    # frees a node's FULL layers must report any Mamba host copy it took with
+    # it, so the Controller can attribute the loss instead of discovering it as
+    # a missing hit. Empty unless a Mamba host copy was freed.
+    mamba_host_invalidated: dict[str, int] = msgspec.field(default_factory=dict)
 
     def __del__(self) -> None:
         # Drop tripwire: every returned value must be drained before disposal.

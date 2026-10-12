@@ -1313,6 +1313,7 @@ class UnifiedTreeCore(UnifiedTreeCoreInterface):
                 result.tracker,
                 device_frees=result.device_frees,
                 host_frees=result.host_frees,
+                invalidated=result.mamba_host_invalidated,
             )
             return result
         self._demote(
@@ -1357,6 +1358,7 @@ class UnifiedTreeCore(UnifiedTreeCoreInterface):
                 result.tracker,
                 result.device_frees,
                 result.host_frees,
+                invalidated=result.mamba_host_invalidated,
             )
             self._remove_leaf_from_parent(desc)
         self._delete_unbacked_device_leaf(
@@ -1364,9 +1366,22 @@ class UnifiedTreeCore(UnifiedTreeCoreInterface):
             result.tracker,
             device_frees=result.device_frees,
             host_frees=result.host_frees,
+            invalidated=result.mamba_host_invalidated,
         )
         result.is_dropped = True
         return result
+
+    def _mamba_host_loss(self, node: UnifiedTreeNode) -> int:
+        """1 if *node* is about to lose a Mamba host checkpoint, else 0.
+
+        A Mamba state is only useful as the rewind point of a KV prefix, so when
+        the node's FULL layers go to zero the checkpoint is worthless even
+        though the host slot itself is still valid memory. Count it here, at the
+        single place that knows a node is being torn down.
+        """
+        if ComponentType.MAMBA not in node.component_types:
+            return 0
+        return int(node.component_data[ComponentType.MAMBA].host_value is not None)
 
     def _release_all_component_layers(
         self,
@@ -1375,9 +1390,18 @@ class UnifiedTreeCore(UnifiedTreeCoreInterface):
         tracker: dict[ComponentType, int],
         device_frees: dict[ComponentType, list[torch.Tensor]],
         host_frees: dict[ComponentType, list[torch.Tensor]],
+        invalidated: Optional[dict[str, int]] = None,
     ) -> None:
         """Free every component layer on the node and detach it from the LRU
-        lists and evictable leaf sets."""
+        lists and evictable leaf sets.
+
+        When *invalidated* is given, a Mamba host checkpoint freed here is
+        tallied into it.
+        """
+        if invalidated is not None:
+            lost = self._mamba_host_loss(node)
+            if lost:
+                invalidated["kv_delete"] = invalidated.get("kv_delete", 0) + lost
         self.kv_events.record_remove(node, medium=medium)
         for comp in self.components:
             self._evict_component_and_detach_lru(
@@ -1397,16 +1421,26 @@ class UnifiedTreeCore(UnifiedTreeCoreInterface):
         tracker: dict[ComponentType, int],
         device_frees: dict[ComponentType, list[torch.Tensor]],
         host_frees: dict[ComponentType, list[torch.Tensor]],
+        invalidated: Optional[dict[str, int]] = None,
     ) -> None:
         """Delete a device leaf that has no host backup, freeing all layers."""
         self._release_all_component_layers(
-            node, StorageMedium.GPU, tracker, device_frees, host_frees
+            node,
+            StorageMedium.GPU,
+            tracker,
+            device_frees,
+            host_frees,
+            invalidated=invalidated,
         )
         parent = node.parent
         self._remove_leaf_from_parent(node)
         self._update_evictable_leaf_sets(parent)
         self._iteratively_delete_tombstone_leaf(
-            node, tracker, device_frees=device_frees, host_frees=host_frees
+            node,
+            tracker,
+            device_frees=device_frees,
+            host_frees=host_frees,
+            invalidated=invalidated,
         )
 
     def drive_host_eviction(
@@ -1650,7 +1684,9 @@ class UnifiedTreeCore(UnifiedTreeCoreInterface):
             tracker[comp.component_type] += hf
         self.evictable_host_leaves.discard(node)
         self._remove_leaf_from_parent(node)
-        self._iteratively_delete_tombstone_leaf(node, tracker, device_frees, host_frees)
+        self._iteratively_delete_tombstone_leaf(
+            node, tracker, device_frees, host_frees, invalidated=None
+        )
 
     def demote(self, node_id: NodeId) -> DemoteResult:
         """Release a node's device KV once its host copy exists; the node stays in the
@@ -1806,6 +1842,7 @@ class UnifiedTreeCore(UnifiedTreeCoreInterface):
         tracker: dict[ComponentType, int],
         device_frees: dict[ComponentType, list[torch.Tensor]],
         host_frees: dict[ComponentType, list[torch.Tensor]],
+        invalidated: Optional[dict[str, int]] = None,
     ):
         """Walk up from *deleted_node* and cascade-delete childless ancestors.
 
@@ -1813,6 +1850,9 @@ class UnifiedTreeCore(UnifiedTreeCoreInterface):
           - Full device present  → keep as D-leaf
           - Full host present    → keep as H-leaf
           - neither              → evict all remaining data, delete, continue up
+
+        When *invalidated* is given, the cascade reports the Mamba host
+        checkpoints it destroys into it.
         """
         ct = BASE_COMPONENT_TYPE
         cur = deleted_node.parent
@@ -1846,6 +1886,12 @@ class UnifiedTreeCore(UnifiedTreeCoreInterface):
                 break
 
             # Full absent on both layers — evict remaining host data, delete.
+            if invalidated is not None:
+                lost = self._mamba_host_loss(cur)
+                if lost:
+                    invalidated["tombstone"] = (
+                        invalidated.get("tombstone", 0) + lost
+                    )
             for comp in self.components_by_type.values():
                 if comp.node_has_component_data(cur, target=EvictLayer.HOST):
                     self._evict_component_and_detach_lru(

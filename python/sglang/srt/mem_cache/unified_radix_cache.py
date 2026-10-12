@@ -656,6 +656,11 @@ class UnifiedRadixCache(BasePrefixCache):
         result = self.tree_core.evict_device_leaf(node_id, self.is_write_back)
         self._free_values(result.device_frees, result.host_frees)
         self._accumulate_tracker(tracker, result.tracker)
+        if result.mamba_host_invalidated and self.metrics_collector is not None:
+            for reason, num in result.mamba_host_invalidated.items():
+                self.metrics_collector.increment_mamba_checkpoint_invalidated(
+                    reason, num
+                )
         return result.backup_kv
 
     def _demote(self, node_id: NodeId, tracker: dict[ComponentType, int]) -> None:
@@ -671,6 +676,11 @@ class UnifiedRadixCache(BasePrefixCache):
         result = self.tree_core.drop_subtree_no_host(node_id)
         self._free_values(result.device_frees, result.host_frees)
         self._accumulate_tracker(tracker, result.tracker)
+        if result.mamba_host_invalidated and self.metrics_collector is not None:
+            for reason, num in result.mamba_host_invalidated.items():
+                self.metrics_collector.increment_mamba_checkpoint_invalidated(
+                    reason, num
+                )
         return result.is_dropped
 
     def _evict_components(

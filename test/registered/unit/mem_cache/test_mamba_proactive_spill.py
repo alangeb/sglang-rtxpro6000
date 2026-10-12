@@ -8,6 +8,7 @@ is selection/bookkeeping over fakes -- no controller, no GPU.
 
 import unittest
 from array import array
+from collections import defaultdict
 from types import SimpleNamespace
 from unittest import mock
 
@@ -19,11 +20,18 @@ from sglang.srt.mem_cache.unified_cache import component_type as ct_mod
 from sglang.srt.mem_cache.unified_cache.components.mamba_component import (
     MambaComponent,
 )
-from sglang.srt.mem_cache.unified_cache.components.tree_component import ComponentType
+from sglang.srt.mem_cache.unified_cache.components.tree_component import (
+    ComponentType,
+    EvictLayer,
+)
 from sglang.srt.mem_cache.unified_cache.unified_tree_core import (
     UnifiedLRUList,
     UnifiedTreeCore,
     UnifiedTreeNode,
+)
+from sglang.srt.mem_cache.unified_cache.unified_tree_core_interface import (
+    DropSubtreeNoHostResult,
+    EvictDeviceLeafResult,
 )
 from sglang.srt.mem_cache.unified_radix_cache import UnifiedRadixCache
 from sglang.test.ci.ci_register import register_cpu_ci
@@ -32,6 +40,19 @@ register_cpu_ci(est_time=2, suite="base-a-test-cpu")
 
 COMPS = (ComponentType.FULL, ComponentType.MAMBA)
 MAMBA = ComponentType.MAMBA
+FULL = ComponentType.FULL
+
+
+def _node_has_data(ct):
+    """``TreeComponent.node_has_component_data`` over a fake node's values."""
+
+    def _has(node, target=EvictLayer.DEVICE):
+        cd = node.component_data[ct]
+        if target is EvictLayer.DEVICE:
+            return cd.value is not None
+        return cd.host_value is not None
+
+    return _has
 
 
 def _node(parent, token: int, *, device: bool = True, host: bool = False,
@@ -442,3 +463,145 @@ class TestResumeProtectedMethod(unittest.TestCase):
         comp._resume_leases["s1"] = {998: True}
         comp._pending_resume_backup[997] = {"s1": 1}
         self.assertFalse(comp.resume_protected(node))
+
+
+class _FakeEvictCore(_FakeCore):
+    """``_FakeCore`` plus the bookkeeping the real teardown path touches.
+
+    Binds the real ``_mamba_host_loss``, ``_release_all_component_layers``,
+    ``_delete_unbacked_device_leaf``, ``_iteratively_delete_tombstone_leaf``,
+    ``_remove_leaf_from_parent``, ``_update_evictable_leaf_sets`` and the leaf
+    predicates. Only the per-component free (``_evict_component_and_detach_lru``)
+    stays fake -- same stand-in the spill-backup tests use -- so the accounting
+    under test runs against the real call wiring and the real tree surgery.
+    """
+
+    _mamba_host_loss = UnifiedTreeCore._mamba_host_loss
+    _release_all_component_layers = UnifiedTreeCore._release_all_component_layers
+    _delete_unbacked_device_leaf = UnifiedTreeCore._delete_unbacked_device_leaf
+    _iteratively_delete_tombstone_leaf = (
+        UnifiedTreeCore._iteratively_delete_tombstone_leaf
+    )
+    _remove_leaf_from_parent = UnifiedTreeCore._remove_leaf_from_parent
+    _unregister_node = UnifiedTreeCore._unregister_node
+    _update_evictable_leaf_sets = UnifiedTreeCore._update_evictable_leaf_sets
+    _is_device_leaf = UnifiedTreeCore._is_device_leaf
+    _is_host_leaf = UnifiedTreeCore._is_host_leaf
+
+    def __init__(self):
+        super().__init__()
+        self.page_size = 1
+        self.kv_events = SimpleNamespace(record_remove=lambda n, medium=None: None)
+        self.evictable_device_leaves: set = set()
+        self.evictable_host_leaves: set = set()
+        self.full_host_duplicates: dict = {}
+        self._node_arena = self._ids
+        self.components_by_type[FULL] = SimpleNamespace(
+            component_type=FULL,
+            session_ref=lambda n: n.component_data[FULL].session_ref,
+            node_has_component_data=_node_has_data(FULL),
+            discard_deleted_session_leaf=lambda n: None,
+        )
+        mamba = self.components_by_type[MAMBA]
+        mamba.component_type = MAMBA
+        mamba.node_has_component_data = _node_has_data(MAMBA)
+        mamba.discard_deleted_session_leaf = lambda n: None
+        self.components = (self.components_by_type[FULL], mamba)
+
+    def _evict_component_and_detach_lru(
+        self,
+        node,
+        comp,
+        device_frees,
+        host_frees,
+        target=EvictLayer.DEVICE,
+        tracker=None,
+    ):
+        """Stand-in for the allocator-level free: clear the layer's value(s)."""
+        ct = comp.component_type
+        cd = node.component_data[ct]
+        device_freed = host_freed = 0
+        if EvictLayer.DEVICE in target and cd.value is not None:
+            device_frees.setdefault(ct, []).append(cd.value)
+            device_freed = len(cd.value)
+            cd.value = None
+        if EvictLayer.HOST in target and cd.host_value is not None:
+            host_frees.setdefault(ct, []).append(cd.host_value)
+            host_freed = len(cd.host_value)
+            cd.host_value = None
+        if tracker is not None:
+            if EvictLayer.DEVICE in target:
+                tracker[ct] = tracker.get(ct, 0) + device_freed
+            elif EvictLayer.HOST in target:
+                tracker[ct] = tracker.get(ct, 0) + host_freed
+        for lru in (self.lru_lists.get(ct), self.host_lru_lists.get(ct)):
+            if lru is not None and lru.in_list(node):
+                lru.remove_node(node)
+        return device_freed, host_freed
+
+
+class TestCheckpointInvalidationAccounting(unittest.TestCase):
+    """A step that frees a node's FULL layers must report the Mamba host copy
+    it took with it, so the Controller can count the loss."""
+
+    def test_unbacked_delete_reports_the_mamba_host_copy(self):
+        core = _FakeEvictCore()
+        node = core.add(core.root_node, 1, device=True, host=True, full_host=False)
+        invalidated: dict = {}
+
+        UnifiedTreeCore._delete_unbacked_device_leaf(
+            core,
+            node,
+            defaultdict(int),
+            device_frees={},
+            host_frees={},
+            invalidated=invalidated,
+        )
+
+        self.assertEqual(invalidated, {"kv_delete": 1})
+        self.assertIsNone(node.component_data[MAMBA].host_value)
+        self.assertNotIn(node.key.child_key(1), core.root_node.children)
+
+    def test_node_without_mamba_host_reports_nothing(self):
+        core = _FakeEvictCore()
+        node = core.add(core.root_node, 1, device=True, host=False, full_host=False)
+        invalidated: dict = {}
+
+        UnifiedTreeCore._delete_unbacked_device_leaf(
+            core,
+            node,
+            defaultdict(int),
+            device_frees={},
+            host_frees={},
+            invalidated=invalidated,
+        )
+
+        self.assertEqual(invalidated, {})
+        self.assertNotIn(node.key.child_key(1), core.root_node.children)
+
+    def test_tombstone_cascade_reports_its_losses(self):
+        """Childless ancestor with a Mamba host copy and no FULL on either tier
+        is torn down by the cascade: that loss is a tombstone, not a kv_delete."""
+        core = _FakeEvictCore()
+        ancestor = core.add(core.root_node, 1, device=True, host=True, full_host=False)
+        leaf = core.add(ancestor, 2, device=True, host=False, full_host=False)
+        # The ancestor is a tombstone: FULL gone from both tiers, Mamba host left.
+        ancestor.component_data[ComponentType.FULL].value = None
+
+        invalidated: dict = {}
+        UnifiedTreeCore._delete_unbacked_device_leaf(
+            core,
+            leaf,
+            defaultdict(int),
+            device_frees={},
+            host_frees={},
+            invalidated=invalidated,
+        )
+
+        self.assertEqual(invalidated, {"tombstone": 1})
+        self.assertIsNone(ancestor.component_data[MAMBA].host_value)
+        self.assertNotIn(ancestor.key.child_key(1), core.root_node.children)
+
+    def test_result_field_defaults_empty(self):
+        self.assertEqual(EvictDeviceLeafResult().mamba_host_invalidated, {})
+        self.assertEqual(DropSubtreeNoHostResult().mamba_host_invalidated, {})
