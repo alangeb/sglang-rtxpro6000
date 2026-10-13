@@ -769,3 +769,63 @@ class TestSanityCheckMambaOnlyCarveOut(unittest.TestCase):
         msg = str(ctx.exception)
         self.assertIn("mamba host present but Full.host_value=None", msg)
         self.assertIn("dead: no Full device and no Full host", msg)
+
+
+class TestSpillAckOrdering(unittest.TestCase):
+    """The ack path must release the spill lock BEFORE recycling the device slot.
+
+    Production crash (:8001, first spill of the first long conversation after the
+    selector landed): the scheduler died in
+    ``MambaComponent.release_component_lock`` with
+    ``TypeError: object of type 'NoneType' has no len()``.
+
+    Mechanism: ``_execute_mamba_backup`` pins the victim with ``inc_lock_ref`` so
+    the device eviction walk cannot recycle the DMA source mid-copy. Releasing
+    that lock is not a bare counter decrement -- ``release_component_lock`` reads
+    ``cd.value`` to move ``len(value)`` tokens from protected back to evictable.
+    ``_finish_mamba_spill`` is what nulls ``cd.value``. Releasing the lock after
+    the free therefore reads None and raises.
+
+    The existing ack test cannot see this: it stubs ``dec_lock_ref`` to append to
+    a log, so the release never touches ``cd.value``. This test makes the stub
+    behave like the real component -- it reads the value, as the real code does.
+    """
+
+    def _cache_with_realistic_unlock(self, core, node):
+        cache = TestMambaSpillBackup()._cache(core, node)
+
+        sizes = {"protected": 1, "evictable": 0}
+
+        def _dec_lock(nid, params=None, skip_swa=False):
+            cache._lock_log.append(("dec", nid))
+            # Mirror MambaComponent.release_component_lock: the accounting it
+            # performs dereferences the device value. If the slot was already
+            # recycled, this is the crash.
+            value = node.component_data[MAMBA].value
+            if node.component_data[MAMBA].lock_ref > 0:
+                vlen = len(value)  # TypeError if the spill freed it first
+                sizes["protected"] -= vlen
+                sizes["evictable"] += vlen
+            node.component_data[MAMBA].lock_ref -= 1
+
+        cache.dec_lock_ref = _dec_lock
+        cache._test_sizes = sizes
+        node.component_data[MAMBA].lock_ref = 1
+        return cache
+
+    def test_unlock_reads_the_device_value_before_it_is_freed(self):
+        core = _FakeCore()
+        node = core.add(core.root_node, 1)
+        cache = self._cache_with_realistic_unlock(core, node)
+
+        self.assertTrue(cache._execute_mamba_backup(node.id))
+        cache._finish_write_through_ack(node.id)  # must not raise
+
+        self.assertEqual(
+            cache._lock_log, [("inc", node.id), ("dec", node.id)]
+        )
+        # Unlock ran first, free second: the release observed a live value and
+        # moved its tokens back to evictable, and the slot is gone afterwards.
+        self.assertEqual(cache._test_sizes, {"protected": 0, "evictable": 1})
+        self.assertIsNone(node.component_data[MAMBA].value)
+        self.assertEqual(node.component_data[MAMBA].lock_ref, 0)

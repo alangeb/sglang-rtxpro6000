@@ -1545,11 +1545,22 @@ class UnifiedRadixCache(BasePrefixCache):
         )
         self.tree_core.finish_write_through(publish_node_ids, ack_id)
         spill_node_id = self.ongoing_mamba_spill.pop(ack_id, None)
+        # ORDER MATTERS. A spill locks the victim (inc_lock_ref) so the device
+        # eviction walk cannot recycle the DMA source mid-copy, and releasing
+        # that lock reads cd.value to move vlen tokens from protected back to
+        # evictable (MambaComponent.release_component_lock). _finish_mamba_spill
+        # is what frees that device value. Releasing after the free therefore
+        # reads None and crashes the scheduler: TypeError: object of type
+        # 'NoneType' has no len() -- observed on production :8001 on the first
+        # spill of the first long conversation after the selector landed.
+        # Unlock first, then recycle the slot: within this single-threaded ack
+        # pass nothing can allocate between the two, so the pin is not needed a
+        # moment after the copy has landed.
+        if lock_params is not None:
+            self.dec_lock_ref(lock_node_id, lock_params)
         if spill_node_id is not None:
             # The D->H copy landed: only now may the device slot be recycled.
             self._finish_mamba_spill(spill_node_id)
-        if lock_params is not None:
-            self.dec_lock_ref(lock_node_id, lock_params)
         if self.enable_storage:
             # Back up each fragment: after a split, lock_node only holds the
             # suffix; the prefix fragment must be persisted as well.
