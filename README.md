@@ -1,3 +1,129 @@
+# Q38-FN — Penny Royal fork with Mamba-only host cache (production)
+
+> **This repository is a fork of [jpezzulli/sglang-rtxpro6000](https://github.com/jpezzulli/sglang-rtxpro6000)
+> ("Penny Royal"). The default branch, `q38fn/pennyroyal3-host-mamba`, is the source of the
+> container that serves production traffic on our RTX PRO 6000. The unmodified upstream
+> Penny Royal README is preserved at the [end of this file](#upstream-penny-royal-readme-unmodified).**
+
+## What this is
+
+A production SGLang runtime for **Qwen3.8-Flash-Next (NVFP4)** on **one RTX PRO 6000 Blackwell
+(96 GB, SM120)**, carrying 19 commits of local work on top of Penny Royal 3.0
+(`ghcr.io/jpezzulli/sglang-rtxpro6000:v3.0.0`, source revision `5d33142c1f`).
+
+The work is concentrated in one subsystem: **the Mamba/GDN recurrent-state checkpoint tier** of
+the unified radix cache (`python/sglang/srt/mem_cache/`). The model is hybrid — 48 of 64
+layers are Gated DeltaNet linear attention, whose state is a fixed-size recurrent tensor rather
+than growing KV. Penny Royal 3.0 could spill those states to host memory, but only under an
+upstream invariant that made the spill path almost never fire in our configuration. This branch
+removes that blocker and makes the host tier actually usable.
+
+## Why: the problem this solves
+
+Agentic traffic is the opposite of chat traffic. One conversation runs to ~90–130K prompt
+tokens, and almost every turn re-uses the whole prefix. The cost of a turn is therefore almost
+entirely decided by **how much of the prefix the engine has to recompute**, and for a hybrid
+model that is bounded by the *Mamba checkpoint grid*, not by the KV pool.
+
+Upstream keeps a tree node alive only if its **FULL** (attention-KV) copy survives on some layer.
+Our configuration deliberately keeps almost no host KV — the KV host tier is a
+`MINIMAL_KV_HOST_GB` placeholder — so a spilled Mamba checkpoint sits on a node whose FULL host
+copy does not exist. Upstream's rule then made that node, and its checkpoint, immediately
+evictable: the spill path fired, wrote, and the state was dropped before anything could read it.
+Measured before this work: ~0 % host-tier contribution, and every long turn recomputed its whole
+prompt.
+
+## What changed
+
+| Change | Flag / commit | Effect |
+|---|---|---|
+| **Mamba-only host cache** — relax the "FULL host copy required" invariant so a node may stay anchored on Mamba-host evidence alone | `SGLANG_MAMBA_ONLY_HOST_CACHE=1`, `316f4e3c33` | The host tier becomes reachable at all. Without it the rest of this table is inert |
+| **Host anchor** — `host_anchored()` used wherever upstream *requires* FULL to keep a node alive (never to claim a node is restorable) | `SGLANG_MAMBA_HOST_ANCHOR=1`, `ee55aaac77` | Checkpoint survives eviction pressure |
+| **Proactive spill at the allocation choke point** — device→host spill when the Mamba slot pool hits a low-water mark, instead of only on eviction | `SGLANG_MAMBA_SPILL_LOW_WATER=8`, `e008836b3f` + fix `0e9d10a0f9` | Spill happens before the pool is exhausted, off the critical path |
+| **Completion-boundary retention** — prefer to keep the checkpoint taken at a turn boundary | `SGLANG_MAMBA_COMPLETION_RETENTION=1`, `cba883d77c` | The one checkpoint an agent will actually re-enter is the one kept |
+| **Per-slot guard + accounting** — reject out-of-range slot ids before the copy; count checkpoints destroyed by KV eviction | `SGLANG_MAMBA_PER_SLOT=1`, `02bbc25df8`, `204c83c500` | Turns an illegal-memory-access crash into a host miss |
+| **Spill-lock release** (HEAD) | `11d16eb1df` | Releases the spill lock before recycling the spilled device slot |
+
+**Net effect on production:** effective prefix-cache hit ratio **96.96 %** across 1.48 B prompt
+tokens in 48 h (device 96.39 %, host 0.57 %), ITL p50 **4.1 ms**, TTFT p50 **444 ms**, at an
+average prompt of **62,563 tokens**. The host tier now demonstrably serves reads
+(`host_hit=8512 mamba_host=1 branching=Yes` in engine logs).
+
+## How to use it
+
+The launch recipe is **not** in this repository (see *Runtime recipe* below). The shape of a
+production launch:
+
+```bash
+SGLANG_MAMBA_ONLY_HOST_CACHE=1   # required for everything below
+SGLANG_MAMBA_HOST_ANCHOR=1
+SGLANG_MAMBA_COMPLETION_RETENTION=1
+SGLANG_MAMBA_SPILL_LOW_WATER=8   # spill when free device slots drop to this
+SGLANG_MAMBA_HOST_SIZE_GB=10     # host Mamba pool size
+
+sglang serve \
+  --model-path <RadixArk/Qwen3.8-Flash-Next-NVFP4 snapshot> \
+  --quantization modelopt_fp4 --fp4-gemm-backend flashinfer_cutlass \
+  --kv-cache-dtype fp8_e4m3 --page-size 64 \
+  --context-length 200000 --max-total-tokens 1000000 \
+  --max-running-requests 8 --cuda-graph-max-bs-decode 8 \
+  --chunked-prefill-size 4096 --mem-fraction-static 0.981 \
+  --mamba-radix-cache-strategy extra_buffer_lazy \
+  --mamba-track-interval 4096 --mamba-ssm-dtype bfloat16 \
+  --max-mamba-cache-size 32 --gdn-mtp-cache-mode none \
+  --speculative-num-steps 3 --speculative-num-draft-tokens 3
+```
+
+**Checkpoint density is the knob that matters.** `--mamba-track-interval` sets one checkpoint
+every N tokens; the pool is `--max-mamba-cache-size` device slots plus the host tier (10 GB →
+170 slots at 59 MB/slot). At interval 4096 that is **202 checkpoints ≈ 827K tokens of rewind
+depth**, and it is what a long agent conversation actually consumes: 8 concurrent sessions at
+~90K tokens need ~168 of the 170 host slots. Halving the interval doubles the rewind depth
+resolution and halves the coverage; at interval 64 a checkpoint costs ~922 KB per KV-token
+equivalent instead of ~4.9 KB, which is what made the tier useless before this work.
+
+`--gdn-mtp-cache-mode none` is deliberate: with speculative decoding enabled, the draft path
+would otherwise force a Mamba checkpoint per draft width. `--cuda-graph-max-bs-decode 8` keeps
+the C=1 batch in the bucket the adaptive MTP widths were tuned for.
+
+## Known issues on this branch
+
+- **`sanity_check` false positive.** The idle invariant *"node backed up but parent not backed
+  up"* (`unified_tree_core.py:2392`) has no Mamba carve-out, so in Mamba-only host mode a child
+  can legitimately hold a FULL host copy its parent never got. It has taken the scheduler down
+  three times (2026-10-14/15/16). Upstream addressed the neighbouring host-LRU check in
+  `ad09a8171d`, then reverted it (`f95229f9f9`). Not yet fixed here.
+- **Tombstone-cascade guard missing.** `00e50f64e0` (*keep host-anchored bridge nodes alive in
+  tombstone cascade*) is on branch `mamba-host-anchor-v253` and **not** on this branch. Without
+  it a cascade can delete an ancestor an in-flight match stands on → `AttributeError` on
+  `collect_full_device_indices` → scheduler exit 137. Cherry-pick before the next deploy.
+- **Healthcheck port.** The image's baked probe targets `:8001`; this deployment publishes
+  `30000→8001`. Use the self-resolving `docker/pennyroyal/healthcheck.py` (`5dac6b0790`) and set
+  `PENNYROYAL_HEALTH_PORT`, or Docker will report a healthy server as `unhealthy`.
+
+## Runtime recipe is not in git
+
+The compose file, launcher, `.env`, adaptive-width JSON and host cache directories live in
+`~/bench_out/q38fn-p3-experiment-20261011/` on the serving host, outside version control. The
+image tag we run (`q38fn-p3-mamba-only-v9`) additionally carries a single-file overlay layer
+whose Dockerfile is not in the tree — the *content* is reproducible from this branch (verified
+by md5 against the running container, 3,523/3,523 files), the *build* is not.
+
+## Vendor sync
+
+`pennyroyal` upstream moved to 3.1.x (+160 commits at time of writing). The newer Mamba/host work
+there is on paths this deployment does not run (NIXL host pool `812c11b754`, DFlash
+`e7a57a2afb`, `d817ab6d51`); the Mamba-backup ownership family is already merged here.
+
+---
+
+<a id="upstream-penny-royal-readme-unmodified"></a>
+
+## Upstream Penny Royal README (unmodified)
+
+Everything below is the original `README.md` from `jpezzulli/sglang-rtxpro6000` at the revision
+this fork is based on, kept verbatim.
+
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="assets/brand/penny-royal/logos/logo-horizontal-dark.svg">
