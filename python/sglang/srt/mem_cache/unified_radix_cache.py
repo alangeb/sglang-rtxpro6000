@@ -124,6 +124,15 @@ COMPONENT_REGISTRY: dict[ComponentType, type[TreeComponent]] = {
 
 logger = logging.getLogger(__name__)
 
+# Consecutive stale node ids tolerated in one device-eviction walk before the
+# walk aborts (defect #4 guard). A single stale pop is benign — the node was
+# deleted by an earlier step of the same walk — but a streak means the walk is
+# not converging: it would keep popping dead ids without ever satisfying the
+# allocation target. Aborting surfaces the shortfall through the normal
+# retry/OOM path instead of spinning inside one eviction call. Generous: real
+# walks delete a handful of nodes per pass, never dozens in a row.
+_STALE_EVICT_WALK_CAP = 64
+
 
 class _OngoingWriteThrough(NamedTuple):
     """Tracks an in-flight D→H write-through operation."""
@@ -161,8 +170,11 @@ class UnifiedRadixCache(BasePrefixCache):
         self.token_to_kv_pool_allocator = params.token_to_kv_pool_allocator
         self.disable = params.disable
         # Device-eviction steps skipped because the popped node id was already
-        # deleted by an earlier step of the same walk (defect #4).
+        # deleted by an earlier step of the same walk (defect #4). The
+        # consecutive counter drives the walk-abort cap; it resets on every
+        # clean step, so it only grows while the walk is stuck.
         self.stale_evict_skips = 0
+        self.stale_evict_skips_consecutive = 0
 
         if params.enable_metrics:
             self.init_metrics_collector()
@@ -662,20 +674,39 @@ class UnifiedRadixCache(BasePrefixCache):
         split re-parent). That surfaced in production as a scheduler-killing
         KeyError at unified_tree_core.node_by_id (defect #4, 2026-10-24). The
         node is gone and its space is already back in the allocator, so skipping
-        the stale id is the correct step; the counter bounds a pathological spin
-        and makes the event visible in the log.
+        the stale id is the correct step.
+
+        Only the arena miss itself is absorbed: ``node_by_id`` raises
+        ``KeyError(node_id)``, so the key must equal the id we were handed. Any
+        other KeyError comes from unrelated logic deeper in the step and is
+        re-raised rather than laundered into a skip.
+
+        Consecutive skips are counted, never bounded here: the caller's walk
+        aborts at ``_STALE_EVICT_WALK_CAP`` (see _evict_components) so a
+        non-converging walk cannot spin inside one eviction call. A reset on
+        every clean step means the streak only grows when the walk is stuck.
         """
         try:
             result = self.tree_core.evict_device_leaf(node_id, self.is_write_back)
-        except KeyError:
+        except KeyError as exc:
+            if not exc.args or exc.args[0] != node_id:
+                raise
             self.stale_evict_skips += 1
-            if self.stale_evict_skips <= 3:
+            self.stale_evict_skips_consecutive += 1
+            total = self.stale_evict_skips
+            # Log the first few and then every power of two: a monotone,
+            # countable signal in the log without flooding it.
+            if total <= 3 or (total & (total - 1)) == 0:
                 logger.warning(
                     "evict: stale node id %d in device-eviction walk "
-                    "(deleted by an earlier step of the same walk); skipping",
+                    "(deleted by an earlier step of the same walk); skipping "
+                    "(total %d, consecutive %d)",
                     node_id,
+                    total,
+                    self.stale_evict_skips_consecutive,
                 )
             return None
+        self.stale_evict_skips_consecutive = 0
         self._free_values(result.device_frees, result.host_frees)
         self._accumulate_tracker(tracker, result.tracker)
         if result.mamba_host_invalidated and self.metrics_collector is not None:
@@ -733,6 +764,7 @@ class UnifiedRadixCache(BasePrefixCache):
             if tracker[ct] >= request_cnt or target_reached(ct):
                 continue
             self.tree_core.evict_device_start(ct, request_cnt)
+            stale_streak_at = self.stale_evict_skips_consecutive
             try:
                 while not target_reached(ct):
                     node_id, made_progress = self._evict_device_next_node(ct, tracker)
@@ -741,6 +773,23 @@ class UnifiedRadixCache(BasePrefixCache):
                             # Internal tombstone frees are now allocator-visible;
                             # recheck the allocation target before walking again.
                             continue
+                        break
+                    # Defect #4 guard: a stale pop is skipped by
+                    # _evict_device_leaf, but a long streak means the walk is
+                    # popping dead ids forever without reaching the target.
+                    # Abort; the finally below still ends the walk cleanly and
+                    # the caller sees the allocation shortfall as normal.
+                    if (
+                        self.stale_evict_skips_consecutive - stale_streak_at
+                        > _STALE_EVICT_WALK_CAP
+                    ):
+                        logger.error(
+                            "evict: %d consecutive stale node ids in the %s "
+                            "device-eviction walk; aborting the walk (last %d)",
+                            self.stale_evict_skips_consecutive - stale_streak_at,
+                            ct,
+                            node_id,
+                        )
                         break
                     backup_kv = self._evict_device_leaf(node_id, tracker)
                     if backup_kv is not None:
