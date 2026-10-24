@@ -160,6 +160,9 @@ class UnifiedRadixCache(BasePrefixCache):
         self.req_to_token_pool = params.req_to_token_pool
         self.token_to_kv_pool_allocator = params.token_to_kv_pool_allocator
         self.disable = params.disable
+        # Device-eviction steps skipped because the popped node id was already
+        # deleted by an earlier step of the same walk (defect #4).
+        self.stale_evict_skips = 0
 
         if params.enable_metrics:
             self.init_metrics_collector()
@@ -652,8 +655,27 @@ class UnifiedRadixCache(BasePrefixCache):
         self, node_id: NodeId, tracker: dict[ComponentType, int]
     ) -> Optional[BackupKV]:
         """Evict one device leaf, consuming its step result; returns the
-        deferred write-back BackupKV when one must run before the demote."""
-        result = self.tree_core.evict_device_leaf(node_id, self.is_write_back)
+        deferred write-back BackupKV when one must run before the demote.
+
+        A node id popped from the eviction walk can name a node that an earlier
+        step of the same walk already deleted (cascade delete / tombstone /
+        split re-parent). That surfaced in production as a scheduler-killing
+        KeyError at unified_tree_core.node_by_id (defect #4, 2026-10-24). The
+        node is gone and its space is already back in the allocator, so skipping
+        the stale id is the correct step; the counter bounds a pathological spin
+        and makes the event visible in the log.
+        """
+        try:
+            result = self.tree_core.evict_device_leaf(node_id, self.is_write_back)
+        except KeyError:
+            self.stale_evict_skips += 1
+            if self.stale_evict_skips <= 3:
+                logger.warning(
+                    "evict: stale node id %d in device-eviction walk "
+                    "(deleted by an earlier step of the same walk); skipping",
+                    node_id,
+                )
+            return None
         self._free_values(result.device_frees, result.host_frees)
         self._accumulate_tracker(tracker, result.tracker)
         if result.mamba_host_invalidated and self.metrics_collector is not None:
