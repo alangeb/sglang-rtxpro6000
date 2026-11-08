@@ -1,0 +1,6 @@
+
+## Rebase status — RC1 (2026-11-08, same day)
+- Branch `q38fn/pennyroyal316-host-mamba` @ tag `q38fn-p316-rebase-rc1`: 20 fork commits replayed on `pennyroyal-v3.1.6`; worktree `/home/alangeb/wt-q38fn-rebase-316`; tree clean, zero conflict markers, 11/14 fork files byte-identical to prod branch, 3 merged (Dockerfile install-strategy change, assembler + unified_radix_cache = both-side changes, our hunks + upstream v3.1.x content verified present).
+- Tests (mem_cache suite, inside v3.1.6 image, CPU-only box): rebased FAILED-set vs pristine-v3.1.6 FAILED-set delta = +4/-0. The 4 (`test_unified_radix_allocation_eviction.py`) fail IDENTICALLY on pristine upstream v3.1.6 and on prod-branch code — environment-related (no GPU), not caused by our patches.
+- Candidate image built: `sglang-rtxpro6000:q38fn-p316-mamba-only-v1` (7b1350112c51) = overlay of rebased python/ onto official `ghcr.io/jpezzulli/sglang-rtxpro6000:v3.1.6` (31936dafd2ba), import gate passed, revision label set to rebased HEAD.
+- REMAINING before cutover: (1) GPU boot + serving smoke on scratch compose (needs GPU-0 quiet window — one-model-per-GPU rule; prod :8001 untouched so far); (2) bench parity vs v11 (llama-benchy + forkN); (3) miss-probe regression (plan in wiki q38fn-cache-miss-investigation); (4) flip prod overlay to new tag; (5) re-pin PROD_PIN.md + wiki to v12 image.
