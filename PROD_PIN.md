@@ -34,3 +34,6 @@
 - Compose kept for re-run: /home/alangeb/bench_out/q38fn-p316-smoke-20261108/docker-compose.smoke.yaml (entrypoint:[] + GPU reservation are REQUIRED — base v3.1.6 image ships ENTRYPOINT pennyroyal; omitting the reservation fails with "No accelerator").
 - Prod restored: docker start q38fn-p3-v3-prod → healthy after 330 s, mamba tier reallocated, restarts=0.
 - REMAINING to cutover: bench parity vs v11, miss-probe regression, prod overlay flip, re-pin.
+
+## Qualification verdict — NOT QUALIFIED (2026-11-08, post-GPU-window)
+Bench parity held (pp2048 c1 9695 vs 10247, c4 11221 vs 10949, c8 11375 vs 9085, c16 9647 vs 8893; tg32 all within ±3%) and the semantic restore probe recalled the secret in all paths on both builds — but the candidate FAILED the host-restore engagement probe that v11 passes (full evidence + bisect plan in REGRESSION-p316-rc1-host-restore.md). v11 remains production; candidate image kept for debugging. The probe is now a permanent regression gate: any future rebase must pass `restore_probe.py` with `mamba_host=1` on R2 before cutover.
