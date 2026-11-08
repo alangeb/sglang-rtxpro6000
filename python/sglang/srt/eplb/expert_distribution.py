@@ -397,8 +397,10 @@ class _SinglePassGatherer(ABC):
 
 
 class _DetailSinglePassGatherer(_SinglePassGatherer):
-    # DeepSeek V3 has this value; should generalize later
-    _TOP_K_NUM = 8
+    # DeepSeek V3 has this value; should generalize later.
+    # q38fn: models with a wider router (e.g. Qwen4-Exp top-10) override via env.
+    import os as _os
+    _TOP_K_NUM = int(_os.environ.get("SGLANG_EXPERT_TRACE_TOPK", "8"))
 
     def __init__(
         self,
