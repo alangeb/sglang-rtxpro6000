@@ -24,7 +24,7 @@
 ## INCIDENT UPDATE 2026-11-09 (authoritative for restarts)
 The bench_out compose/launcher tree was lost from /home during the VM rebuild + restore (bench_out/ now holds only root-owned empty mount skeletons). Production runs correctly but had NO restart path until reconstruction.
 - Rebuilt restart tree: /home/alangeb/sglang-rtxpro6000-cache/deploy/ (dir: /home/alangeb/sglang-rtxpro6000-cache/) (docker-compose.p316-prod.yaml + healthcheck.py + RUNBOOK.md + docker-compose.canary.yaml), generated from the LIVE container (inspect + /proc/1/cmdline archived in /home/alangeb/recovered-experiment-20261109/).
-- RESTART = docker rm -f q38fn-p3-v3-prod && cd /home/alangeb/bench_out-rebuilt-20261109 && docker compose -f docker-compose.p316-prod.yaml up -d
+- RESTART = docker rm -f q38fn-p3-v3-prod && cd /home/alangeb/sglang-rtxpro6000-cache/deploy && docker compose -f docker-compose.p316-prod.yaml up -d
 - VERIFY after restart: /health -> restore_probe.py PASS (fresh boot) -> canary cycle OK (script: recovered-experiment-20261109/restore_canary.py).
 - Model blobs verified complete post-restore: 206 safetensors shards, 125.9 GiB, 0 missing links.
 - All v12 qualification/rollback/restore-probe commits live on branch q38fn/pennyroyal316-host-mamba (e250af9d89..d200a080b5) — merge that branch to fold docs+probes back.
