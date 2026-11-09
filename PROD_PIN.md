@@ -41,3 +41,13 @@ Prod now streams the 47.68 GiB PLE table from /data/flash-next-ple (ssd_stream r
 Symptom: q38fn-p3-v3-prod pinned 94-100% of one core while completely idle (GPU 0%, zero requests) — measured since the v3.1.6-era boots, quantified 2026-11-09.
 Root cause (py-spy on sglang::scheduler, container pid 67): Scheduler.event_loop_overlap -> Scheduler.on_idle (scheduler.py:4333-4345) runs a FULL UnifiedTreeCore.sanity_check (recursive walk, unified_tree_core.py:2431/2546, _is_host_leaf per node), pool invariant check, and ShmLoadSnapshotWriter.write + SchedulerLoadInquirer.get_loads on EVERY idle iteration, and `maybe_sleep_on_idle` was a no-op because IdleSleeper is only created when server_args.sleep_on_idle is true (scheduler.py:811 -> server_args.py:1323, default False). NOT caused by the NVMe PLE flip — same behavior existed since the v3.1.6 cutover; the ssd-stream worker threads were idle in every dump.
 Fix: launch flag `--sleep-on-idle` added to docker-compose.p316-prod.yaml (parks the event loop in zmq poller up to 1 s when idle; wake on request is immediate). Verified: container CPU 100.74% -> 0.47-0.53% idle; generation OK (17*23=391); memory unchanged 14.2 GiB. Rollback: remove the flag.
+
+## PLE ROW-ID TRACE LIVE 2026-11-09 ~20:07Z (patched plugin via bind-mount, image unchanged)
+sglang-rtxpro6000-cache/deploy/ple-plugin/ (copy of the in-image 0.2.0+pennyroyal2 adapter + _BatchTraceWriter)
+is bind-mounted ro over /opt/pennyroyal/.ple-nvme; SGLANG_SSD_STREAM_TRACE_PATH=/trace/ple-rowids.bin writes
+per-batch UNIQUE row-id records ([int32 n][n x int64]) to sglang-rtxpro6000-experiments/ple-trace/.
+Purpose: 1-2 h of real agent traffic -> ple_trace_sim.py (same dir) -> hit-rate curves for LRU / LRU+admission /
+static-hot at 0.25-16 GiB -> pick policy+size for the pinned row cache (the ~10% NVMe-PLE cost + page-cache
+eviction risk under a co-resident second model). Boot verified: "SSD Stream row-id trace enabled" + reader
+engaged; generation OK; health 200; idle CPU 1.5% (sleep-on-idle intact). Rollback: remove the ple-plugin mount
++ the TRACE_PATH env, restart (image untouched throughout).
