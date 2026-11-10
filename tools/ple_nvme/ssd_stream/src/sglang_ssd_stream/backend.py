@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import collections
+import os
 import threading
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import nullcontext
+from pathlib import Path
+
+import numpy as np
 
 import torch
 import triton
@@ -31,6 +36,84 @@ from .config import SSDStreamConfig
 # for BF16 tables instead of halving it and rejecting default prefill lookups.
 _STAGING_MIB = 16
 _STAGING_SLOTS = 2
+
+_TRACE_ENV = "SGLANG_SSD_STREAM_TRACE_PATH"
+_ROW_CACHE_GIB_ENV = "SGLANG_SSD_STREAM_ROW_CACHE_GIB"
+_NO_PAGE_CACHE_ENV = "SGLANG_SSD_STREAM_NO_PAGE_CACHE"
+
+
+class _PinnedRowCache:
+    """Exact-LRU pinned-memory cache of PLE rows (row_id -> bytes).
+
+    Single-threaded by contract: all calls happen on the staging executor
+    thread. Lookup/insert are O(batch) Python loops over per-row dict entries —
+    negligible next to the NVMe round trips they avoid.
+    """
+
+    def __init__(self, capacity_rows: int, row_nbytes: int) -> None:
+        self.capacity = capacity_rows
+        self.row_nbytes = row_nbytes
+        self.buf = torch.empty(
+            (capacity_rows, row_nbytes), dtype=torch.uint8, device="cpu", pin_memory=True
+        )
+        self.order: collections.OrderedDict[int, int] = collections.OrderedDict()
+        self.free: list[int] = list(range(capacity_rows))
+        self.hits = 0
+        self.misses = 0
+
+    def lookup(self, ids: np.ndarray):
+        """Return (hit_positions, hit_slots, miss_positions) into the batch."""
+        hit_pos: list[int] = []
+        hit_slots: list[int] = []
+        miss_pos: list[int] = []
+        order = self.order
+        for i, rid in enumerate(ids.tolist()):
+            slot = order.get(rid)
+            if slot is None:
+                miss_pos.append(i)
+            else:
+                order.move_to_end(rid)
+                hit_pos.append(i)
+                hit_slots.append(slot)
+        self.hits += len(hit_pos)
+        self.misses += len(miss_pos)
+        return (
+            np.fromiter(hit_pos, dtype=np.int64, count=len(hit_pos)),
+            np.fromiter(hit_slots, dtype=np.int64, count=len(hit_slots)),
+            np.fromiter(miss_pos, dtype=np.int64, count=len(miss_pos)),
+        )
+
+    def insert(self, uniq_ids: np.ndarray, rows: np.ndarray) -> None:
+        while len(self.order) + len(uniq_ids) > self.capacity and self.order:
+            _old_rid, old_slot = self.order.popitem(last=False)
+            self.free.append(old_slot)
+        new_slots = np.empty(len(uniq_ids), dtype=np.int64)
+        for i, rid in enumerate(uniq_ids.tolist()):
+            slot = self.order.get(rid)
+            if slot is None:
+                slot = self.free.pop()
+                self.order[rid] = slot
+            new_slots[i] = slot
+        self.buf[torch.as_tensor(new_slots)] = torch.as_tensor(rows)
+
+
+class _BatchTraceWriter:
+    """Append-only per-batch unique-row-id trace for offline cache simulation.
+
+    Record format: int32 count followed by `count` sorted int64 row ids, one
+    record per staging call (batch-atomic). Enabled via SGLANG_SSD_STREAM_TRACE_PATH.
+    """
+
+    def __init__(self, path: str) -> None:
+        self._path = Path(path)
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._fh = open(self._path, "ab", buffering=1 << 20)
+        logger.info("SSD Stream row-id trace enabled: %s", self._path)
+
+    def write_batch(self, ids: np.ndarray) -> None:
+        uniq = np.unique(ids)
+        self._fh.write(np.int32(len(uniq)).tobytes())
+        self._fh.write(uniq.astype(np.int64, copy=False).tobytes())
 
 
 @triton.jit
@@ -210,6 +293,22 @@ class SSDStreamEmbedding(VocabParallelEmbedding):
             tp_end,
         )
         self._block_d = triton.next_power_of_2(self.embedding_dim)
+        trace_path = os.environ.get(_TRACE_ENV)
+        self._trace = _BatchTraceWriter(trace_path) if trace_path else None
+        cache_gib = float(os.environ.get(_ROW_CACHE_GIB_ENV, "0") or 0)
+        self._row_cache = None
+        if cache_gib > 0:
+            capacity = int(cache_gib * (1 << 30) // self._row_nbytes)
+            self._row_cache = _PinnedRowCache(capacity, self._row_nbytes)
+        self._no_page_cache = os.environ.get(_NO_PAGE_CACHE_ENV, "") == "1"
+        self._backing_fd = (
+            os.open(self.backing_path, os.O_RDONLY) if self._no_page_cache else None
+        )
+        if self._row_cache is not None:
+            logger.info(
+                "SSD Stream pinned row cache: %.2f GiB (%d rows, exact LRU); page-cache bypass=%s",
+                cache_gib, self._row_cache.capacity, self._no_page_cache,
+            )
         logger.info(
             "SSD Stream enabled: backing=%s sha256=%s size=%.2f GiB "
             "staging_slots=%d staging_per_slot=%.2f MiB capacity=%d rows "
@@ -256,12 +355,46 @@ class SSDStreamEmbedding(VocabParallelEmbedding):
         torch.cuda.set_device(device)
         slot.ids_ready.synchronize()
 
+        if self._trace is not None:
+            self._trace.write_batch(slot.ids_numpy[:row_count])
+
+        if self._row_cache is not None:
+            self._stage_calls = getattr(self, "_stage_calls", 0) + 1
+            if self._stage_calls % 500 == 0:
+                logger.info(
+                    "SSD Stream row cache stats: calls=%d hits=%d misses=%d hit_rate=%.1f%% entries=%d",
+                    self._stage_calls, self._row_cache.hits, self._row_cache.misses,
+                    100.0 * self._row_cache.hits / max(1, self._row_cache.hits + self._row_cache.misses),
+                    len(self._row_cache.order),
+                )
+
         if self._reader is None:
             raise RuntimeError("SSD Stream page reader is unavailable")
-        self._reader.gather(
-            slot.ids_numpy[:row_count],
-            slot.rows_numpy[:row_count],
-        )
+
+        if self._row_cache is not None:
+            ids = slot.ids_numpy[:row_count]
+            hit_pos, hit_slots, miss_pos = self._row_cache.lookup(ids)
+            if len(hit_pos):
+                slot.rows_numpy[:row_count][hit_pos] = self._row_cache.buf.numpy()[
+                    hit_slots
+                ]
+            if len(miss_pos):
+                miss_ids = np.ascontiguousarray(ids[miss_pos])
+                miss_rows = np.empty((len(miss_pos), self._row_nbytes), dtype=np.uint8)
+                self._reader.gather(miss_ids, miss_rows)
+                slot.rows_numpy[:row_count][miss_pos] = miss_rows
+                uniq_ids, first_idx = np.unique(miss_ids, return_index=True)
+                self._row_cache.insert(
+                    uniq_ids, np.ascontiguousarray(miss_rows[first_idx])
+                )
+        else:
+            self._reader.gather(
+                slot.ids_numpy[:row_count],
+                slot.rows_numpy[:row_count],
+            )
+
+        if self._no_page_cache and self._backing_fd is not None:
+            os.posix_fadvise(self._backing_fd, 0, 0, os.POSIX_FADV_DONTNEED)
 
         with torch.cuda.stream(stream):
             _copy_ple_staged_rows_kernel[(row_count,)](
