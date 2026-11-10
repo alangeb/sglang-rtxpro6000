@@ -51,3 +51,21 @@ static-hot at 0.25-16 GiB -> pick policy+size for the pinned row cache (the ~10%
 eviction risk under a co-resident second model). Boot verified: "SSD Stream row-id trace enabled" + reader
 engaged; generation OK; health 200; idle CPU 1.5% (sleep-on-idle intact). Rollback: remove the ple-plugin mount
 + the TRACE_PATH env, restart (image untouched throughout).
+
+## PLE ROW CACHE LIVE 2026-11-10 ~11:00Z (final production config)
+Prod runs: SGLANG_SSD_STREAM_ROW_CACHE_GIB=4 (pinned exact-LRU row cache, 26.8M rows), SGLANG_SSD_STREAM_NO_PAGE_CACHE=1
+(fadvise DONTNEED after every gather -> PLE access NEVER benefits from page cache), trace still on. Patched plugin
+bind-mounted from sglang-rtxpro6000-cache/deploy/ple-plugin; source committed to tools/ple_nvme (rebase branch).
+GEOMETRY CORRECTION: the table is 320,001,536 rows x 160 B (16 heads x 20M x 160B) — NOT 20M x 2560B. The observed
+working set is only ~2.55M rows = 388 MiB; 4 GiB pin covers it 10x over (1 GiB would suffice; env knob to resize).
+Benchmarks (200k-token direct tests, page cache bypassed, spin fixed):
+- floor (no cache, bypass): cold 67.4 s / warm 27.6 s (drive-state dependent)
+- 1 GiB: docA_cold 20.1 s / docB_shuffled 20.3 / docA_warm 20.3 (all ~9.9k tok/s)
+- 2 GiB: docA_cold 41.8* / docB 20.0 / docA_warm 20.0   (* first-big-read transient + host I/O contention)
+- 4 GiB: docA_cold 54.2* / docB 20.3 / docA_warm 20.2; recheck: cold 40.6 -> warm 19.9 (2x on repeats, at compute floor)
+- Correctness: 3/3 prompts any-of-3 match baseline at every size; outputs always fluent (nondeterminism = batch-state
+  sampling flips, established separately). Decode 219-245 tok/s all configs. 5090/vLLM untouched throughout.
+- CONCLUSION: on the pro6000 the streaming I/O is compute-hidden (cold ~10k tok/s ~= RAM baseline 11.1k); the cache
+  buys determinism (page-cache independence + 2x on repeat prefills vs cold) but no steady-state gain. The earlier
+  "10% impact" was the idle-CPU spin. Keep 4 GiB (headroom); drop to 1 via env if the second model needs RAM.
+- First-big-read-after-boot is variable (20-54 s for 200k) and NOT cache-related (reproduces at all sizes).
