@@ -3,24 +3,34 @@
 **Status:** LIVE since 2026-11-09 ~14:00Z · Image unchanged: `sglang-rtxpro6000:q38fn-p316-mamba-only-v1` (prod pin `q38fn-p316-prod-20261108`)
 **Authoritative config:** `/home/alangeb/sglang-rtxpro6000-cache/deploy/docker-compose.p316-prod.yaml`
 
+> **2026-11-10 PATH MIGRATION:** `/data` is RETIRED (host folder move; do not recreate or mount it).
+> Prepared overlay → `/home/alangeb/flash-next-ple/` · HF cache → `/home/alangeb/.cache/huggingface/`
+> (the default location). All 408 absolute weight symlinks inside the overlay were rewritten from
+> `/data/cache/huggingface/...` → `/home/alangeb/.cache/huggingface/...` (408/408 resolve, 0 broken);
+> `ssd-stream.json` `source.path` updated to match. The container mounts the HF cache at the **same
+> absolute path** so the symlinks resolve identically inside and outside. Paths below reflect the
+> new layout; `/data` mentions kept only where they describe history.
+
 ## 1. What this is
 
 The Qwen3.8-Flash-Next PLE table (20 M rows × 2560 B fp8, layer 2, n-gram-row addressed) is
 **47.68 GiB**. Until 2026-11-09 it was pinned in host RAM (`PENNY_PLE_BACKEND=ram` default), the
 single largest RAM consumer on the box. It is now **streamed from NVMe** by the `ssd_stream`
 reader (io_uring + O_DIRECT, bounded row buffers + page pool; the Linux page cache acts as the
-row cache). Prepared snapshot: `/data/flash-next-ple/` (`ple/layer-0.bin`, 51,200,245,760 bytes,
+row cache). Prepared snapshot: `/home/alangeb/flash-next-ple/` (`ple/layer-0.bin`, 51,200,245,760 bytes,
 + `ssd-stream.json` manifest, + all ordinary weights as **absolute symlinks into
-`/data/cache/huggingface/...` blobs** — hence `/data` must be mounted ro at the same host path).
+`/home/alangeb/.cache/huggingface/...` blobs** — hence the HF cache is mounted at the same
+absolute path in the container; pre-2026-11-10 these pointed into `/data/cache/huggingface/...`,
+retired with `/data`).
 Upstream feature docs: `NVME-PLE.md`, `tools/ple_nvme/` (in-repo).
 
 ## 2. Exact change (compose deltas)
 
 | item | value |
 |---|---|
-| `--model-path` | `/data/flash-next-ple` — **the prepared overlay, NOT the HF snapshot** (its index excludes PLE tensors) |
-| env | `PENNY_PLE_BACKEND=nvme`, `PENNY_PLE_NVME_MODEL=/data/flash-next-ple`, `SGLANG_PLUGINS=ssd_stream`, `PYTHONPATH=/opt/pennyroyal/.ple-nvme:/opt/pennyroyal/python` |
-| mounts | `/data:/data:ro` added; everything else unchanged |
+| `--model-path` | `/home/alangeb/flash-next-ple` — **the prepared overlay, NOT the HF snapshot** (its index excludes PLE tensors) |
+| env | `PENNY_PLE_BACKEND=nvme`, `PENNY_PLE_NVME_MODEL=/home/alangeb/flash-next-ple`, `SGLANG_PLUGINS=ssd_stream`, `PYTHONPATH=/opt/pennyroyal/.ple-nvme:/opt/pennyroyal/python` |
+| mounts | overlay `/home/alangeb/flash-next-ple` (ro, same path) + `/home/alangeb/.cache/huggingface` (same path); **no `/data` mounts since 2026-11-10** |
 | security | `seccomp=unconfined` (io_uring; same as upstream `run.sh --nvme-ple`) |
 | user | `user: "0"` (v3.1.6 base has `/root` 750; default user `penny` cannot traverse `/root/.cache`) |
 | network | **bridge + `ports: ["8001:30000"]`** — NOT host networking |
@@ -38,7 +48,7 @@ and `sglang serve` rejects them (we proved it the hard way).
   `--source` spelled as the **manifest-recorded path**; the check compares literal resolved paths,
   not just hashes.)
 - `BF16-STAGING-HOTFIX.md` is v2.5.2-only — **not applicable** on v3.1.6.
-- Boot log must show: `SSD Stream enabled: backing=/data/flash-next-ple/ple/layer-0.bin …`.
+- Boot log must show: `SSD Stream enabled: backing=/home/alangeb/flash-next-ple/ple/layer-0.bin …`.
 
 ## 4. Measured results (200k-token direct `/generate` tests, device idle)
 
@@ -79,8 +89,9 @@ Boot ~7–12 min (JIT caches warm in `../cache/`; first boot after cache loss re
 **Rollback to RAM PLE** (one restart):
 1. `PENNY_PLE_BACKEND=ram` (or delete the four PENNY/SGLANG/PYTHONPATH env additions)
 2. `--model-path` back to the HF snapshot
-   `/root/.cache/huggingface/hub/models--RadixArk--Qwen3.8-Flash-Next-NVFP4/snapshots/7b719225242aacd3dbd3f9407468c2ee9a9d2594`
-3. drop the `/data:/data:ro` mount · restart.
+   `/home/alangeb/.cache/huggingface/hub/models--RadixArk--Qwen3.8-Flash-Next-NVFP4/snapshots/7b719225242aacd3dbd3f9407468c2ee9a9d2594`
+   (pre-2026-11-10 it lived under `/data/cache/huggingface/...`; `/data` no longer exists)
+3. restart.
 
 **Monitoring:** `free -g` (used should stay ≈17–20 GiB; growth = leak), canary JSONL
 (`ok`, `recall`, `invalidated` fields), `/metrics` mamba counters. Restore probe script was lost
@@ -92,8 +103,9 @@ with bench_out — canary covers the same assertions; recreate on request.
    (isolated `--target` install is not on sys.path; without them the server **silently** stays in
    RAM mode — detect via scheduler RSS, it fails closed only if the plugin *loads and errors*).
 2. `--field` args are NIXL-namespace-helper syntax, not `sglang serve` flags.
-3. The prepared overlay resolves weights through **absolute** symlinks → mount `/data` at the
-   identical host path, ro.
+3. The prepared overlay resolves weights through **absolute** symlinks → the HF cache is mounted at
+   the **same absolute path** as the host (`/home/alangeb/.cache/huggingface`); historically `/data`
+   was mounted ro at the identical path for the same reason.
 4. Old prod ran as root (`user: "0"`); the image's `/root` is 750 → default user breaks model
    config read.
 5. Prod networking is **bridge + 8001→30000**, not host mode (server silently healthy on 30000
